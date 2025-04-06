@@ -11,10 +11,10 @@ object Commons {
     val local, remote = Value
   }
 
-  import DeploymentMode.*
+  import utils.Commons.DeploymentMode._
 
   def initializeSparkContext(deploymentMode: String, spark: SparkSession): Unit = {
-    if (deploymentMode == remote) {
+    if (deploymentMode == "remote") {
       val stream: InputStream = getClass.getResourceAsStream(Config.credentialsPath)
       val lines = scala.io.Source.fromInputStream( stream ).getLines.toList
 
@@ -28,14 +28,14 @@ object Commons {
 
   def getDatasetPath(deploymentMode: String, localPath: String, remotePath: String): String = {
     if (deploymentMode == "local") {
-      return "file://" + Config.projectDir + "/" + localPath
+      "file://" + Config.projectDir + "/" + localPath
     }
     else {
-      return "s3a://" + Config.s3bucketName + "/" + remotePath
+      "s3a://" + Config.s3bucketName + "/" + remotePath
     }
   }
 
   def getDatasetPath(deploymentMode: String, path: String): String = {
-    return getDatasetPath(deploymentMode, path, path)
+    getDatasetPath(deploymentMode, path, path)
   }
 }
