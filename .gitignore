@@ -272,5 +272,7 @@ fabric.properties
 # Ignore Gradle project-specific cache directory
 .gradle
 
+dataset
+
 # Ignore Gradle build output directory
 build
