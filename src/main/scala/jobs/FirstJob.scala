@@ -17,8 +17,6 @@ object FirstJob {
       .appName("First job")
       .getOrCreate()
 
-    spark.conf.set("spark.sql.parquet.enableVectorizedReader","false")
-
     if(args.length == 0){
       println("The first parameter should indicate the deployment mode (\"local\" or \"remote\")")
       return
@@ -35,7 +33,6 @@ object FirstJob {
     val rddFhvhvDataset = spark.read
       .parquet(Commons.getDatasetPath(deploymentMode, fhvhvDatasetDir)).rdd
 
-    // You can now use typical RDD operations
     rddYellowDataset.take(5).foreach(println)
     rddGreenDataset.take(5).foreach(println)
     rddFhvDataset.take(5).foreach(println)
