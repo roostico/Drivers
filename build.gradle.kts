@@ -54,7 +54,7 @@ dependencies {
     implementation("org.scala-lang:scala-compiler:2.12.15")
     implementation("org.apache.spark:spark-hive_2.12:3.5.1")
     implementation("org.apache.spark:spark-streaming_2.12:3.5.1")
-
+    implementation("org.apache.spark:spark-mllib_2.12:3.5.1")
 
     // Test dependencies
     testImplementation("org.junit.jupiter:junit-jupiter-api:5.3.1")

@@ -2,6 +2,8 @@ package jobs
 
 import org.apache.spark.sql.SparkSession
 import utils._
+import utils.Preprocess.{addDurationRemovingNegatives, binColByStepValue, binColByEqualQuantiles, dropNullValues}
+import org.apache.spark.sql.functions._
 
 object FirstJob {
 
@@ -13,6 +15,7 @@ object FirstJob {
   val outputDir = "/output/firstJobOutput"
   
   def main(args: Array[String]): Unit = {
+    
     val spark = SparkSession.builder
       .appName("First job")
       .getOrCreate()
@@ -24,18 +27,14 @@ object FirstJob {
 
     val deploymentMode = args(0)
 
-    val rddYellowDataset = spark.read
-      .parquet(Commons.getDatasetPath(deploymentMode, yellowDatasetDir)).rdd
-    val rddGreenDataset = spark.read
-      .parquet(Commons.getDatasetPath(deploymentMode, greenDatasetDir)).rdd
-    val rddFhvDataset = spark.read
-      .parquet(Commons.getDatasetPath(deploymentMode, fhvDatasetDir)).rdd
-    val rddFhvhvDataset = spark.read
-      .parquet(Commons.getDatasetPath(deploymentMode, fhvhvDatasetDir)).rdd
+    val yellowDataset = dropNullValues(spark.read
+      .parquet(Commons.getDatasetPath(deploymentMode, yellowDatasetDir))) // First: 44644946 DropNull: 40013565 DropNegativeDuration: 39999817
 
-    rddYellowDataset.take(5).foreach(println)
-    rddGreenDataset.take(5).foreach(println)
-    rddFhvDataset.take(5).foreach(println)
-    rddFhvhvDataset.take(5).foreach(println)
+    val datasetWithBins = binColByStepValue(addDurationRemovingNegatives(yellowDataset), "duration_minutes")
+    val datasetWithEqualBins = binColByEqualQuantiles(addDurationRemovingNegatives(yellowDataset), "duration_minutes", 25)
+
+    val durationCountsEquals = datasetWithEqualBins.groupBy("duration_minutes_bin_label").count().orderBy("duration_minutes_bin_label")
+    durationCountsEquals.show(300)
+
   }
 }
