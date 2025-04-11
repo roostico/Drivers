@@ -2,7 +2,7 @@ package jobs
 
 import org.apache.spark.sql.SparkSession
 import utils._
-import utils.Preprocess.{addDurationRemovingNegatives, binColByStepValue, binColByEqualQuantiles, dropNullValues}
+import utils.Preprocess.{addDurationRemovingNegatives, addTimeZones, addYear, applyAllPreprocess, binColByEqualQuantiles, binColByStepValue, dropNullValues}
 import org.apache.spark.sql.functions._
 
 object FirstJob {
@@ -12,7 +12,8 @@ object FirstJob {
   private val greenDatasetDir = s"$datasetDir/dataset_green"
   private val fhvDatasetDir = s"$datasetDir/dataset_fhv"
   private val fhvhvDatasetDir = s"$datasetDir/dataset_fhvhv"
-  val outputDir = "/output/firstJobOutput"
+  private val outputDir = "/output/firstJobOutput"
+  private val timeZones = Map("overnight" -> (20, 6), "regular" -> (6, 20))
   
   def main(args: Array[String]): Unit = {
     
@@ -20,7 +21,7 @@ object FirstJob {
       .appName("First job")
       .getOrCreate()
 
-    if(args.length == 0){
+    if (args.length == 0) {
       println("The first parameter should indicate the deployment mode (\"local\" or \"remote\")")
       return
     }
@@ -30,11 +31,15 @@ object FirstJob {
     val yellowDataset = dropNullValues(spark.read
       .parquet(Commons.getDatasetPath(deploymentMode, yellowDatasetDir))) // First: 44644946 DropNull: 40013565 DropNegativeDuration: 39999817
 
-    val datasetWithBins = binColByStepValue(addDurationRemovingNegatives(yellowDataset), "duration_minutes")
-    val datasetWithEqualBins = binColByEqualQuantiles(addDurationRemovingNegatives(yellowDataset), "duration_minutes", 25)
 
-    val durationCountsEquals = datasetWithEqualBins.groupBy("duration_minutes_bin_label").count().orderBy("duration_minutes_bin_label")
-    durationCountsEquals.show(300)
+    val datasetWithEqualBins = applyAllPreprocess(
+      yellowDataset,
+      timeZones
+    )
+    datasetWithEqualBins.filter(col("duration_minutes_overnight") > 0 && col("duration_minutes_regular") > 0).show(300)
+
+//    val datasetWithAvgCosts = datasetWithEqualBins.groupBy("duration_minutes_bin_label", "passenger_count").count().orderBy("duration_minutes_bin_label")
+//    datasetWithAvgCosts.show(300)
 
   }
 }
