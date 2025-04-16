@@ -1,7 +1,8 @@
 package utils
-import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.{Column, DataFrame}
 import org.apache.spark.ml.feature.Bucketizer
 import org.apache.spark.sql.functions._
+
 import java.sql.Timestamp
 import java.time._
 import java.time.temporal.ChronoUnit
@@ -12,20 +13,20 @@ object Preprocess {
   private val dropOffCol: String = "dropoff_ts"
   private val surchargeWeekdays: String = "weekday_surcharge"
   private val durationCol: String = "duration_minutes"
+  private val amountMinusTipsCol: String = "total_amount_no_tips"
+  private val aggregateFeeCol: String = "aggregate_fee"
   private val weekDaySurcharge: Double = 2.5
 
   def dropNullValues(df: DataFrame): DataFrame = {
     df.na.drop()
   }
   
-  def addWeekdaysSurchargeCol(df: DataFrame): DataFrame = {
+  private def addWeekdaysSurchargeCol(df: DataFrame): DataFrame = {
     df
       .withColumn(surchargeWeekdays, lit(addWeekdaySurcharge(weekDaySurcharge)(col(pickUpCol))))
   }
 
-  def addDurationRemovingNegatives(df: DataFrame,
-                  dropoff_col: String = "tpep_dropoff_datetime",
-                  pickup_col: String = "tpep_pickup_datetime"): DataFrame = {
+  private def addDurationRemovingNegatives(df: DataFrame, dropoff_col: String, pickup_col: String): DataFrame = {
     df
       .withColumn(pickUpCol, to_timestamp(col(pickup_col), "yyyy-MM-dd'T'HH:mm:ss"))
       .withColumn(dropOffCol, to_timestamp(col(dropoff_col), "yyyy-MM-dd'T'HH:mm:ss"))
@@ -33,26 +34,57 @@ object Preprocess {
       .filter(col(durationCol) > 0)
   }
 
-  def addTimeZones(df: DataFrame, timeZones: Map[String, (Int, Int)]): DataFrame = {
+  private def addTimeZones(df: DataFrame, timeZones: Map[String, (Int, Int)]): DataFrame = {
+
+    val bucket_col = "bucket_times"
     var dfWithBucketTimes = df
-      .withColumn("bucket_times", lit(preciseBucketUDF(timeZones)(col(pickUpCol), col(dropOffCol))))
+      .withColumn(bucket_col, lit(preciseBucketUDF(timeZones)(col(pickUpCol), col(dropOffCol))))
     
     timeZones.keys.zipWithIndex.foreach { case (label, idx) =>
       dfWithBucketTimes = dfWithBucketTimes
-        .withColumn(s"${durationCol}_$label", col("bucket_times").getItem(idx))
+        .withColumn(s"${durationCol}_$label", col(bucket_col).getItem(idx))
     }
     
-    dfWithBucketTimes.drop("bucket_times")
+    dfWithBucketTimes.drop(bucket_col)
   }
 
-  def addYear(df: DataFrame, pickup_col: String = "tpep_pickup_datetime"): DataFrame = {
+  private def addYear(df: DataFrame, pickup_col: String): DataFrame = {
     df
       .withColumn("year", year(to_timestamp(col(pickup_col))))
   }
 
   def binColByStepValue(df: DataFrame, colToDiscrete: String, stepValue: Int = 5): DataFrame = {
-    df
-      .withColumn(s"${colToDiscrete}_bin", (col(colToDiscrete) / stepValue).cast("int") * stepValue)
+    val dfBin = df.withColumn(s"${colToDiscrete}_bin", (col(colToDiscrete) / stepValue).cast("int") * stepValue)
+
+    val rawBin = (col(colToDiscrete) / stepValue).cast("int") * stepValue
+
+    // Shift binBase by +stepValue when it's a negative exact multiple of step
+    val binBase = when(
+      col(colToDiscrete) < 0 && (col(colToDiscrete) % stepValue === lit(0)),
+      rawBin + stepValue
+    ).otherwise(rawBin)
+
+    val isNegative = col(colToDiscrete) < 0
+
+    val binLabel = when(isNegative,
+      concat(
+        lit("["),
+        (binBase - stepValue).cast("int"),
+        lit("|"),
+        binBase.cast("int"),
+        lit(")")
+      )
+    ).otherwise(
+      concat(
+        lit("["),
+        binBase.cast("int"),
+        lit("|"),
+        (binBase + stepValue).cast("int"),
+        lit(")")
+      )
+    )
+
+    dfBin.withColumn(s"${colToDiscrete}_bin_label", binLabel)
   }
 
   def binColByEqualQuantiles(df: DataFrame, colToDiscrete: String, scale: Int = 5): DataFrame = {
@@ -63,7 +95,7 @@ object Preprocess {
     val splits = quantiles.distinct.sorted
 
     val binLabels = splits.sliding(2).map {
-      case Array(start, end) => s"[${start}–${end})"
+      case Array(start, end) => s"[$start|$end)"
     }.toArray
 
     val binLabelUDF = udf((index: Double) =>
@@ -155,37 +187,57 @@ object Preprocess {
 
     dayOfWeek == DayOfWeek.SATURDAY || dayOfWeek == DayOfWeek.SUNDAY
   }
+
+  private def aggregateExtrasAndFees(df: DataFrame, filterFunc: Column => Column): DataFrame = {
+    var dfFiltered = df
+
+    val taxes = List(col("extra"), col("mta_tax"), col("tolls_amount"), col("improvement_surcharge"), col("congestion_surcharge"), col("Airport_fee"), col("weekday_surcharge"))
+
+    taxes.foreach(col => dfFiltered = dfFiltered.filter(filterFunc(col)))
+
+    binColByEqualQuantiles(
+      dfFiltered.withColumn(aggregateFeeCol, round(col("extra") + col("mta_tax") + col("tolls_amount") + col("improvement_surcharge") + col("congestion_surcharge") + col("Airport_fee") + col("weekday_surcharge"), 2)),
+      aggregateFeeCol,
+      10
+    )
+  }
   
-  def applyAllPreprocess(df: DataFrame, timeZones: Map[String, (Int, Int)]): DataFrame = {
-    addWeekdaysSurchargeCol(
-      addTimeZones(
-        addYear(
-          binColByEqualQuantiles(
-            addDurationRemovingNegatives(df), "duration_minutes", 25)),
-        timeZones
+  private def addPricePerMile(df: DataFrame): DataFrame = {
+    val dfWithNoTips = df.withColumn(amountMinusTipsCol, round(col("total_amount") - col("tip_amount"), 2))
+    dfWithNoTips.withColumn("cost_per_distance", round(col(amountMinusTipsCol) / col("trip_distance"), 2))
+  }
+  
+  def getPercentage(df: DataFrame, colNameForPercentage: String, colNameToDivide: String): DataFrame = {
+    df.withColumn(f"${colNameForPercentage}_pcg", round(when(col(colNameToDivide) =!= 0 && col(colNameToDivide).isNotNull,
+      lit(100) * col(colNameForPercentage) / col(colNameToDivide)
+    ), 2))
+  }
+
+  def addCostPerDistanceComparison(df: DataFrame): DataFrame = {
+    df.withColumn("cost_per_distance_diff_pcg", round(lit(100) * (col("cost_per_distance") - col("avg_cost_per_distance")) / col("avg_cost_per_distance"), 2))
+  }
+  
+  def applyAllPreprocess(df: DataFrame, filters: Map[String, Column], taxFilter: Column => Column, timeZones: Map[String, (Int, Int)], dropoff_col: String, pickup_col: String): DataFrame = {
+    val existingFilters = filters.filter { case (colName, _) => df.columns.contains(colName) }
+
+    val filteredDF = existingFilters.values.foldLeft(df) { (accDF, filterExpr) =>
+      accDF.filter(filterExpr)
+    }
+
+    addPricePerMile(
+      aggregateExtrasAndFees(
+        addWeekdaysSurchargeCol(
+          addTimeZones(
+            addYear(
+              binColByEqualQuantiles(
+                addDurationRemovingNegatives(filteredDF, dropoff_col, pickup_col), "duration_minutes", 25),
+              pickup_col
+            ),
+            timeZones
+          )
+        ),
+        taxFilter
       )
     )
   }
 }
-
-
-//VendorID
-//tpep_pickup_datetime
-//tpep_dropoff_datetime
-//passenger_count
-//trip_distance
-//RatecodeID
-//store_and_fwd_flag
-//PULocationID
-//DOLocationID
-//payment_type
-//fare_amount
-//extra
-//mta_tax
-//tip_amount
-//tolls_amount
-//improvement_surcharge
-//total_amount
-//congestion_surcharge
-//airport_fee
-//cbd_congestion_fee 
