@@ -11,6 +11,30 @@
             </JupyterConnectionParameters>
           </value>
         </entry>
+        <entry key="$PROJECT_DIR$/.idea/modules/big-data-drivers.iml">
+          <value>
+            <JupyterConnectionParameters>
+              <option name="managed" value="true" />
+              <option name="sdkName" value="Python 3.13 (lab-cse-24-25)" />
+            </JupyterConnectionParameters>
+          </value>
+        </entry>
+        <entry key="$PROJECT_DIR$/.idea/modules/big-data-drivers.main.iml">
+          <value>
+            <JupyterConnectionParameters>
+              <option name="managed" value="true" />
+              <option name="sdkName" value="Python 3.13 (lab-cse-24-25)" />
+            </JupyterConnectionParameters>
+          </value>
+        </entry>
+        <entry key="$PROJECT_DIR$/.idea/modules/big-data-drivers.test.iml">
+          <value>
+            <JupyterConnectionParameters>
+              <option name="managed" value="true" />
+              <option name="sdkName" value="Python 3.13 (lab-cse-24-25)" />
+            </JupyterConnectionParameters>
+          </value>
+        </entry>
       </map>
     </option>
   </component>
