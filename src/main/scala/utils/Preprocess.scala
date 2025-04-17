@@ -13,7 +13,6 @@ object Preprocess {
   private val dropOffCol: String = "dropoff_ts"
   private val surchargeWeekdays: String = "weekday_surcharge"
   private val durationCol: String = "duration_minutes"
-  private val amountMinusTipsCol: String = "total_amount_no_tips"
   private val aggregateFeeCol: String = "aggregate_fee"
   private val weekDaySurcharge: Double = 2.5
 
@@ -202,9 +201,10 @@ object Preprocess {
     )
   }
   
-  private def addPricePerMile(df: DataFrame): DataFrame = {
-    val dfWithNoTips = df.withColumn(amountMinusTipsCol, round(col("total_amount") - col("tip_amount"), 2))
-    dfWithNoTips.withColumn("cost_per_distance", round(col(amountMinusTipsCol) / col("trip_distance"), 2))
+  private def addPricePerMileAndPerTime(df: DataFrame): DataFrame = {
+    df
+      .withColumn("cost_per_distance", round(col("fare_amount") / col("trip_distance"), 2))
+      .withColumn("cost_per_time", round(col("fare_amount") / col(durationCol), 2))
   }
   
   def getPercentage(df: DataFrame, colNameForPercentage: String, colNameToDivide: String): DataFrame = {
@@ -213,8 +213,8 @@ object Preprocess {
     ), 2))
   }
 
-  def addCostPerDistanceComparison(df: DataFrame): DataFrame = {
-    df.withColumn("cost_per_distance_diff_pcg", round(lit(100) * (col("cost_per_distance") - col("avg_cost_per_distance")) / col("avg_cost_per_distance"), 2))
+  def addCostComparison(df: DataFrame, featComparison: String): DataFrame = {
+    df.withColumn(f"cost_per_${featComparison}_diff_pcg", round(lit(100) * (col(f"cost_per_$featComparison") - col(f"avg_cost_per_$featComparison")) / col(f"avg_cost_per_$featComparison"), 2))
   }
   
   def applyAllPreprocess(df: DataFrame, filters: Map[String, Column], taxFilter: Column => Column, timeZones: Map[String, (Int, Int)], dropoff_col: String, pickup_col: String): DataFrame = {
@@ -224,20 +224,24 @@ object Preprocess {
       accDF.filter(filterExpr)
     }
 
-    addPricePerMile(
-      aggregateExtrasAndFees(
-        addWeekdaysSurchargeCol(
-          addTimeZones(
-            addYear(
-              binColByEqualQuantiles(
-                addDurationRemovingNegatives(filteredDF, dropoff_col, pickup_col), "duration_minutes", 25),
-              pickup_col
-            ),
-            timeZones
-          )
-        ),
-        taxFilter
-      )
+    binColByStepValue(
+      addPricePerMileAndPerTime(
+        aggregateExtrasAndFees(
+          addWeekdaysSurchargeCol(
+            addTimeZones(
+              addYear(
+                binColByStepValue(
+                  addDurationRemovingNegatives(filteredDF, dropoff_col, pickup_col),
+                  "duration_minutes", 5),
+                pickup_col
+              ),
+              timeZones
+            )
+          ),
+          taxFilter
+        )
+      ),
+      "trip_distance", 5
     )
   }
 }
