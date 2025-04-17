@@ -26,7 +26,7 @@ object Preprocess {
       .withColumn(surchargeWeekdays, lit(addWeekdaySurcharge(weekDaySurcharge)(col(pickUpCol))))
   }
 
-  private def addDurationRemovingNegatives(df: DataFrame, dropoff_col: String, pickup_col: String): DataFrame = {
+  def addDurationRemovingNegatives(df: DataFrame, dropoff_col: String, pickup_col: String): DataFrame = {
     df
       .withColumn(pickUpCol, to_timestamp(col(pickup_col), "yyyy-MM-dd'T'HH:mm:ss"))
       .withColumn(dropOffCol, to_timestamp(col(dropoff_col), "yyyy-MM-dd'T'HH:mm:ss"))
