@@ -1,0 +1,5 @@
+pandas
+dotenv
+fsspec
+numpy
+matplotlib

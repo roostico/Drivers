@@ -276,3 +276,5 @@ dataset
 
 # Ignore Gradle build output directory
 build
+
+**/.env
