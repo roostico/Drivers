@@ -5,7 +5,6 @@ import utils._
 import utils.Preprocess.{addCostComparison, applyAllPreprocess, binColByEqualQuantiles, binColByStepValue, dropNullValues, getPercentage}
 import org.apache.spark.sql.functions._
 
-import java.io.PrintWriter
 import scala.language.postfixOps
 
 object FirstJob {
@@ -37,7 +36,7 @@ object FirstJob {
     "year",
     s"duration_minutes_${timeZoneOver}_pcg_bin"
   )
-  private val colsForValuesAnalysis: List[String] = List(
+  private val colsForValuesAnalysis: Seq[String] = Seq(
     "passenger_count",
     "store_and_fwd_flag",
     "payment_type",
@@ -104,60 +103,36 @@ object FirstJob {
       "cost_per_time_diff_pcg", 5
     )
 
-    // {"time" -> {"store_and_fwd_flag_Y" -> {"0-10" -> 5.5%}}}
-    val resultsMap: scala.collection.mutable.Map[
-      String, scala.collection.mutable.Map[
-        String, Map[
-          String, Float]]] =
-      scala.collection.mutable.Map("time" -> scala.collection.mutable.Map(),
-        "distance" -> scala.collection.mutable.Map())
+    val totalCount = dfWithPriceDiffPcg.count()
 
-    val stepForBinEdges: Int = 10
-    val binEdges = (-100 to 100 by stepForBinEdges).map(_.toFloat)
+    val priceCols = Seq("time", "distance").map(feat => f"cost_per_${feat}_diff_pcg_bin_label")
+    val relevantCols = colsForValuesAnalysis ++ priceCols
 
-    colsForValuesAnalysis.foreach { colAnalyze =>
-      val uniqueValues = dfWithPriceDiffPcg.select(col(colAnalyze)).distinct()
-        .collect()
-        .map(_.get(0))
-        .toList
+    val reducedDfForAnalysis = dfWithPriceDiffPcg
+      .select(relevantCols.map(col): _*)
 
-      uniqueValues.foreach { uniqueVal =>
-
-        val filteredDF = dfWithPriceDiffPcg.filter(col(colAnalyze) === uniqueVal)
-        val totalCount = filteredDF.count().toFloat
-
-        if (totalCount > 0) {
-
-          Seq("time", "distance").foreach { feat =>
-            val binCounts = binEdges.map { start =>
-              val end = start + stepForBinEdges
-              val label = s"[$start|$end)"
-              val count = filteredDF
-                .filter(col(f"cost_per_${feat}_diff_pcg") >= start && col(f"cost_per_${feat}_diff_pcg") < end)
-                .count()
-              label -> "%.2f".format(count.toFloat / totalCount * 100).toFloat
-            }.toMap
-
-            // Add extra bin for > 100
-            val over100Count = filteredDF.filter(col(f"cost_per_${feat}_diff_pcg") > 100).count()
-            val overLabel = "(>100)"
-
-            // Add extra bin for > 100
-            val under100Count = filteredDF.filter(col(f"cost_per_${feat}_diff_pcg") < -100).count()
-            val underLabel = "(<-100)"
-
-            val fullBinCounts = binCounts +
-              (overLabel -> "%.2f".format(over100Count.toFloat / totalCount * 100).toFloat) +
-              (underLabel -> "%.2f".format(under100Count.toFloat / totalCount * 100).toFloat)
-
-            resultsMap(feat)(s"$colAnalyze=$uniqueVal") = fullBinCounts
-          }
-        }
-      }
+    // For each column, compute (feature, value, count, pcg)
+    val statsPerFeature = colsForValuesAnalysis.map { colName =>
+      val groupCols = priceCols :+ colName
+      reducedDfForAnalysis.groupBy(groupCols.map(col): _*)
+        .agg(count("*").alias("count"))
+        .withColumn("feature", lit(colName))
+        .withColumn("value", col(colName).cast("string"))
+        .withColumn("cost_distance_label", col("cost_per_distance_diff_pcg_bin_label"))
+        .withColumn("cost_time_label", col("cost_per_time_diff_pcg_bin_label"))
+        .withColumn("pcg", round(col("count") / totalCount.toDouble * 100, 2))
+        .select("feature", "value", "count", "pcg", "cost_distance_label", "cost_time_label")
     }
 
-    val pw = new PrintWriter(outputDir)
-    pw.write(resultsMap.toString)
-    pw.close()
+    // Union all per-feature stats into a single DataFrame
+    val finalStatsDF = statsPerFeature.reduce(_ union _)
+
+    // Show the result
+    finalStatsDF.show(truncate = false)
+
+    finalStatsDF
+      .write
+      .mode("overwrite")
+      .parquet(Commons.getDatasetPath(deploymentMode, outputDir))
   }
 }

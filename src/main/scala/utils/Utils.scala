@@ -5,7 +5,7 @@ import org.apache.spark.sql.functions.{col, desc}
 
 object Utils {
 
-  val feesList = Seq("extra", "mta_tax", "tip_amount", "tolls_amount", "improvement_surcharge", "congestion_surcharge", "airport_fee")
+  private val feesList = Seq("extra", "mta_tax", "tip_amount", "tolls_amount", "improvement_surcharge", "congestion_surcharge", "airport_fee")
 
   def debugDistinctValues(df: DataFrame, features: Seq[String] = feesList): Unit = {
     features.foreach(feat => df.select(feat).distinct().orderBy(desc(feat)).show(500))
