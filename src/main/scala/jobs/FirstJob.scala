@@ -98,7 +98,7 @@ object FirstJob {
             "distance"),
           "time"
         ),
-        "cost_per_distance_diff_pcg", 10
+        "cost_per_distance_diff_pcg", 5
       ),
       "cost_per_time_diff_pcg", 5
     )
@@ -111,7 +111,6 @@ object FirstJob {
     val reducedDfForAnalysis = dfWithPriceDiffPcg
       .select(relevantCols.map(col): _*)
 
-    // For each column, compute (feature, value, count, pcg)
     val statsPerFeature = colsForValuesAnalysis.map { colName =>
       val groupCols = priceCols :+ colName
       reducedDfForAnalysis.groupBy(groupCols.map(col): _*)
@@ -124,11 +123,7 @@ object FirstJob {
         .select("feature", "value", "count", "pcg", "cost_distance_label", "cost_time_label")
     }
 
-    // Union all per-feature stats into a single DataFrame
     val finalStatsDF = statsPerFeature.reduce(_ union _)
-
-    // Show the result
-    finalStatsDF.show(truncate = false)
 
     finalStatsDF
       .write

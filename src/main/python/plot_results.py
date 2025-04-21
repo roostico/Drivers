@@ -1,7 +1,7 @@
 import pandas as pd
 import os
 from dotenv import load_dotenv
-from plot_utils import bin_label
+from plot_utils import bin_label, bin_values, parse_bin
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -11,7 +11,23 @@ load_dotenv()
 
 result_dir = os.getenv('RESULTS_DIR')
 
-# Get all parquet files in the result_dir
+# Graphs per row
+plot_per_row = 3
+
+# Y ticks shown by step of this (i.e. 2 -> one label every 2 ticks)
+step_y_ticks = 2
+
+# Number of ticks on x axis of graps
+max_bins_x = 15
+# If needed to re-bin, set max value so last bin will be >= max_value bin
+max_value_bin = 100
+
+# feat_name, step
+relevant_features = [('distance', 10), ('time', 10)]
+
+# Plot points' size calculated as m*val + q
+size_multiplier, size_scalar=6, 10
+
 parquet_files = [
     os.path.join(result_dir, f)
     for f in os.listdir(result_dir)
@@ -19,13 +35,9 @@ parquet_files = [
 ]
 
 files_number = len(parquet_files)
-plot_per_row = 2
 rows = int(np.ceil(files_number / plot_per_row))
-# feat_name, step
-relevant_features = [('distance', 10), ('time', 5)]
 features_number = len(relevant_features)
 
-# Create subplots
 fig, axs = plt.subplots(rows, plot_per_row, figsize=(plot_per_row * 5, rows * 4), squeeze=False)
 
 # Iterate and read each file
@@ -35,41 +47,45 @@ for idx, file_path in enumerate(parquet_files):
     feature = df['feature'][0]
 
     df = df.dropna()
-    df['value'] = pd.to_numeric(df['value'], errors='coerce')
 
     df_split = {}
     admissible_bins = set()
 
     for (feat_name, step) in relevant_features:
+
+        # If more bins than max x ticks, need to map in new bins
+        if len(df['value'].unique()) > max_bins_x:
+            df = bin_values(df, max_bins_x, max_value_bin)
+
         # Add binned columns
         df[f'{feat_name}_bin'] = df[f'cost_{feat_name}_label'].apply(lambda x: bin_label(x, step=step))
 
         df_splitted = (
             df[['feature', 'value', 'count', f'{feat_name}_bin']]
-            .groupby(['feature', 'value', f'{feat_name}_bin'], as_index=False)
+            .groupby(['feature', 'value', f'{feat_name}_bin'], observed=True)
             .agg({'count': 'sum'})
         )
 
         # Compute sum per ['feature', 'value']
-        total_counts = df_splitted.groupby(['feature', 'value'])['count'].transform('sum')
+        total_counts = df_splitted.groupby(['feature', 'value'], observed=True)['count'].transform('sum')
 
         # Now compute the percentage per group
         df_splitted['pcg'] = round(df_splitted['count'] / total_counts * 100, 5)
 
-        # df_splitted['pcg'] = round(df_splitted['count'] / df_splitted['count'].sum() * 100, 5)
+        df_splitted = df_splitted[df_splitted['count'] != 0].reset_index()
+
+        # Create a temporary column
+        df_splitted['sort_key'] = df_splitted['value'].apply(parse_bin)
+
+        # Sort using the computed values
+        df_splitted = df_splitted.sort_values(by='sort_key')
+
+        # Optionally drop the temp column
+        df_splitted = df_splitted.drop(columns='sort_key')
 
         df_split[feat_name] = df_splitted
 
         admissible_bins.update(df_splitted[f'{feat_name}_bin'].dropna().unique())
-
-    def parse_bin(bin_str):
-        if bin_str.startswith('<'):
-            return -1e6
-        elif bin_str.startswith('>'):
-            return 1e6
-        else:
-            match = re.search(r'\[(-?\d+)\|', bin_str)
-            return int(match.group(1)) if match else np.nan
 
     sorted_bins = sorted(admissible_bins, key=parse_bin)
 
@@ -84,9 +100,8 @@ for idx, file_path in enumerate(parquet_files):
     ax.set_xlabel("Value [%]" if 'pcg' in feature else 'Value')
     ax.set_yticks(range(len(sorted_bins)))
 
-    step = max(step for _, step in relevant_features)
+    visible_labels = [label if i == 0 or i == len(sorted_bins)-1 or i % step_y_ticks == 0 else '' for i, label in enumerate(sorted_bins)]
 
-    visible_labels = [label if i == 0 or i == len(sorted_bins)-1 or i % step == 0 else '' for i, label in enumerate(sorted_bins)]
     ax.set_yticklabels(visible_labels)
 
     # Plotting loop
@@ -100,10 +115,21 @@ for idx, file_path in enumerate(parquet_files):
                 ax.scatter(
                     row['value'],
                     y,
-                    s=10+row['pcg']*8,
+                    s=size_scalar+row['pcg']*size_multiplier,
                     color=color,
                     alpha=0.6
                 )
+
+        ticks = ax.get_xticks()
+        labels = [label.get_text() for label in ax.get_xticklabels()]
+        if len(labels) > 10 or any(len(str(label)) > 5 for label in labels):
+            ax.set_xticks(ticks)
+            ax.set_xticklabels(labels, rotation=315, fontsize=8)
+
+        # line "0"
+        ymin, ymax = ax.get_ylim()
+        middle_y = (ymin + ymax) / 2
+        ax.axhline(middle_y, color='gray', linestyle='--', linewidth=1)
 
 # Hide unused subplots if any
 for idx in range(files_number, rows * plot_per_row):
