@@ -56,12 +56,10 @@ object SecondJob {
       col("trip_duration_min") >= tripDurationLowerBound && col("trip_duration_min") <= tripDurationUpperBound
     )
 
-    filteredWithoutOutliers.show()
-
     // Feat Engineering
     val dfTemp = filteredWithoutOutliers
       .withColumn("hour_of_day", hour(col("tpep_pickup_datetime")))
-      .withColumn("day_of_week", date_format(col("tpep_pickup_datetime"),"u").cast("int"))
+      .withColumn("day_of_week", date_format(col("tpep_pickup_datetime"),"F").cast("int"))
       .withColumn("is_weekend", col("day_of_week").isin(6,7).cast("int"))
       .withColumn("month", month(col("tpep_pickup_datetime")))
       .withColumn("year", year(col("tpep_pickup_datetime")))
@@ -72,6 +70,8 @@ object SecondJob {
           .when(col("hour_of_day").between(16,19), "evening")
           .otherwise("night")
       )
+
+    dfTemp.show()
 
   }
 
