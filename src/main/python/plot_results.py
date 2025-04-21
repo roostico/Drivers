@@ -6,13 +6,14 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import re
+import matplotlib.patches as mpatches
 
 load_dotenv()
 
 result_dir = os.getenv('RESULTS_DIR')
 
 # Graphs per row
-plot_per_row = 3
+plot_per_row = 2
 
 # Y ticks shown by step of this (i.e. 2 -> one label every 2 ticks)
 step_y_ticks = 2
@@ -26,7 +27,7 @@ max_value_bin = 100
 relevant_features = [('distance', 10), ('time', 10)]
 
 # Plot points' size calculated as m*val + q
-size_multiplier, size_scalar=6, 10
+size_multiplier, size_scalar=2, 6
 
 parquet_files = [
     os.path.join(result_dir, f)
@@ -104,10 +105,16 @@ for idx, file_path in enumerate(parquet_files):
 
     ax.set_yticklabels(visible_labels)
 
+    legend_elements = []
+
     # Plotting loop
     for idx_features, (df_feat, df_splitted) in enumerate(df_split.items()):
 
         color = colors(idx_features % features_number)  # unique color per feature
+
+        legend_elements.append(
+            mpatches.Patch(color=color, label=df_feat)
+        )
 
         for _, row in df_splitted.iterrows():
             y = bin_to_y.get(row[f'{df_feat}_bin'], None)
@@ -131,11 +138,20 @@ for idx, file_path in enumerate(parquet_files):
         middle_y = (ymin + ymax) / 2
         ax.axhline(middle_y, color='gray', linestyle='--', linewidth=1)
 
+    ax.legend(
+        handles=legend_elements,
+        title="Avg cost by",
+        bbox_to_anchor=(1.05, 1),
+        loc='upper left',
+        borderaxespad=0.
+    )
+
 # Hide unused subplots if any
 for idx in range(files_number, rows * plot_per_row):
     fig.delaxes(axs[idx // plot_per_row][idx % plot_per_row])
 
 fig.tight_layout()
+plt.subplots_adjust(right=0.8)
 plt.savefig(f"{os.path.join(result_dir + '/graphs.pdf')}", format='pdf')
 plt.show()
 

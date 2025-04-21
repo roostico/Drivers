@@ -192,13 +192,21 @@ object Preprocess {
 
     val taxes = List(col("extra"), col("mta_tax"), col("tolls_amount"), col("improvement_surcharge"), col("congestion_surcharge"), col("Airport_fee"), col("weekday_surcharge"))
 
-    taxes.foreach(col => dfFiltered = dfFiltered.filter(filterFunc(col)))
+    taxes.filter(col => dfFiltered.columns.map(_.toLowerCase).contains(col.toString().stripPrefix("`").stripSuffix("`").toLowerCase)).foreach(col => dfFiltered = dfFiltered.filter(filterFunc(col)))
 
-    binColByEqualQuantiles(
-      dfFiltered.withColumn(aggregateFeeCol, round(col("extra") + col("mta_tax") + col("tolls_amount") + col("improvement_surcharge") + col("congestion_surcharge") + col("Airport_fee") + col("weekday_surcharge"), 2)),
-      aggregateFeeCol,
-      10
-    )
+    if (dfFiltered.columns.map(_.toLowerCase).contains(col("Airport_fee").toString().stripPrefix("`").stripSuffix("`").toLowerCase)) {
+      binColByEqualQuantiles(
+        dfFiltered.withColumn(aggregateFeeCol, round(col("extra") + col("mta_tax") + col("tolls_amount") + col("improvement_surcharge") + col("congestion_surcharge") + col("Airport_fee") + col("weekday_surcharge"), 2)),
+        aggregateFeeCol,
+        10
+      )
+    } else {
+      binColByEqualQuantiles(
+        dfFiltered.withColumn(aggregateFeeCol, round(col("extra") + col("mta_tax") + col("tolls_amount") + col("improvement_surcharge") + col("congestion_surcharge") + col("weekday_surcharge"), 2)),
+        aggregateFeeCol,
+        10
+      )
+    }
   }
   
   private def addPricePerMileAndPerTime(df: DataFrame): DataFrame = {

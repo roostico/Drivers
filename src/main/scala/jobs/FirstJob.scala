@@ -14,6 +14,14 @@ object FirstJob {
   private val greenDatasetDir = s"$datasetDir/dataset_green"
   private val fhvDatasetDir = s"$datasetDir/dataset_fhv"
   private val fhvhvDatasetDir = s"$datasetDir/dataset_fhvhv"
+  private val datasetDirMap: Map[String, String] = Map("yellow" -> yellowDatasetDir, "green" -> greenDatasetDir,
+    "fhv" -> fhvDatasetDir, "fhvhv" -> fhvhvDatasetDir)
+  private val datasetIterator: Iterable[(String, String, String)] = Seq(
+    ("yellow", "tpep_dropoff_datetime", "tpep_pickup_datetime"),
+    ("green", "lpep_dropoff_datetime", "lpep_pickup_datetime"),
+    //("fhv", "tpep_dropoff_datetime", "tpep_pickup_datetime"),
+    //("fhvhv", "tpep_dropoff_datetime", "tpep_pickup_datetime"),
+  )
   private val outputDir = "/output/firstJobOutput"
   private val timeZoneOver: String = "overnight"
   private val timeZones = Map(timeZoneOver -> (20, 6), "regular" -> (6, 20))
@@ -61,73 +69,151 @@ object FirstJob {
 
     val deploymentMode = args(0)
 
-    val yellowDataset = dropNullValues(spark.read
-      .parquet(Commons.getDatasetPath(deploymentMode, yellowDatasetDir)))
-    
-    var dfPreprocessed = applyAllPreprocess(
-      yellowDataset,
-      sparkFilters,
-      taxFilter,
-      timeZones,
-      "tpep_dropoff_datetime",
-      "tpep_pickup_datetime"
-    )
+    datasetIterator.foreach { ds =>
+      val name: String = ds._1
+      val dropoff: String = ds._2
+      val pickup: String = ds._3
 
-    dfPreprocessed = binColByEqualQuantiles(
-      getPercentage(
-        dfPreprocessed, f"duration_minutes_$timeZoneOver", "duration_minutes"),
-      f"duration_minutes_${timeZoneOver}_pcg", 20)
+      var dataset = spark.read
+        .parquet(Commons.getDatasetPath(deploymentMode, datasetDirMap(name)))
 
-    val datasetWithAvgDistanceCosts = dfPreprocessed
-      .groupBy(colsForClassification.map(col): _*)
-      .agg(round(avg("cost_per_distance"), 2).alias("avg_cost_per_distance"))
+      dataset = dataset.drop("ehail_fee")
+      dataset = dropNullValues(dataset)
 
-    val datasetWithAvgTimeCosts = dfPreprocessed
-      .groupBy(colsForClassification.map(col): _*)
-      .agg(round(avg("cost_per_time"), 2).alias("avg_cost_per_time"))
+      var dfPreprocessed = applyAllPreprocess(
+        dataset,
+        sparkFilters,
+        taxFilter,
+        timeZones,
+        dropoff,
+        pickup
+      )
 
-    val dfWithAvgCost = dfPreprocessed
-      .join(datasetWithAvgDistanceCosts, colsForClassification, "left")
-      .join(datasetWithAvgTimeCosts, colsForClassification, "left")
+      dfPreprocessed = binColByEqualQuantiles(
+        getPercentage(
+          dfPreprocessed, f"duration_minutes_$timeZoneOver", "duration_minutes"),
+        f"duration_minutes_${timeZoneOver}_pcg", 20)
 
-    val dfWithPriceDiffPcg = binColByStepValue(
-      binColByStepValue(
-        addCostComparison(
+      val datasetWithAvgDistanceCosts = dfPreprocessed
+        .groupBy(colsForClassification.map(col): _*)
+        .agg(round(avg("cost_per_distance"), 2).alias("avg_cost_per_distance"))
+
+      val datasetWithAvgTimeCosts = dfPreprocessed
+        .groupBy(colsForClassification.map(col): _*)
+        .agg(round(avg("cost_per_time"), 2).alias("avg_cost_per_time"))
+
+      val dfWithAvgCost = dfPreprocessed
+        .join(datasetWithAvgDistanceCosts, colsForClassification, "left")
+        .join(datasetWithAvgTimeCosts, colsForClassification, "left")
+
+      val dfWithPriceDiffPcg = binColByStepValue(
+        binColByStepValue(
           addCostComparison(
-            dfWithAvgCost,
-            "distance"),
-          "time"
+            addCostComparison(
+              dfWithAvgCost,
+              "distance"),
+            "time"
+          ),
+          "cost_per_distance_diff_pcg", 5
         ),
-        "cost_per_distance_diff_pcg", 5
-      ),
-      "cost_per_time_diff_pcg", 5
-    )
+        "cost_per_time_diff_pcg", 5
+      )
 
-    val totalCount = dfWithPriceDiffPcg.count()
+      val totalCount = dfWithPriceDiffPcg.count()
 
-    val priceCols = Seq("time", "distance").map(feat => f"cost_per_${feat}_diff_pcg_bin_label")
-    val relevantCols = colsForValuesAnalysis ++ priceCols
+      val priceCols = Seq("time", "distance").map(feat => f"cost_per_${feat}_diff_pcg_bin_label")
+      val relevantCols = colsForValuesAnalysis ++ priceCols
 
-    val reducedDfForAnalysis = dfWithPriceDiffPcg
-      .select(relevantCols.map(col): _*)
+      val reducedDfForAnalysis = dfWithPriceDiffPcg
+        .select(relevantCols.map(col): _*)
 
-    val statsPerFeature = colsForValuesAnalysis.map { colName =>
-      val groupCols = priceCols :+ colName
-      reducedDfForAnalysis.groupBy(groupCols.map(col): _*)
-        .agg(count("*").alias("count"))
-        .withColumn("feature", lit(colName))
-        .withColumn("value", col(colName).cast("string"))
-        .withColumn("cost_distance_label", col("cost_per_distance_diff_pcg_bin_label"))
-        .withColumn("cost_time_label", col("cost_per_time_diff_pcg_bin_label"))
-        .withColumn("pcg", round(col("count") / totalCount.toDouble * 100, 2))
-        .select("feature", "value", "count", "pcg", "cost_distance_label", "cost_time_label")
+      val statsPerFeature = colsForValuesAnalysis.map { colName =>
+        val groupCols = priceCols :+ colName
+        reducedDfForAnalysis.groupBy(groupCols.map(col): _*)
+          .agg(count("*").alias("count"))
+          .withColumn("feature", lit(colName))
+          .withColumn("value", col(colName).cast("string"))
+          .withColumn("cost_distance_label", col("cost_per_distance_diff_pcg_bin_label"))
+          .withColumn("cost_time_label", col("cost_per_time_diff_pcg_bin_label"))
+          .withColumn("pcg", round(col("count") / totalCount.toDouble * 100, 2))
+          .select("feature", "value", "count", "pcg", "cost_distance_label", "cost_time_label")
+      }
+
+      val finalStatsDF = statsPerFeature.reduce(_ union _)
+
+      finalStatsDF
+        .write
+        .mode("overwrite")
+        .parquet(Commons.getDatasetPath(deploymentMode, outputDir + f"/$name"))
     }
 
-    val finalStatsDF = statsPerFeature.reduce(_ union _)
-
-    finalStatsDF
-      .write
-      .mode("overwrite")
-      .parquet(Commons.getDatasetPath(deploymentMode, outputDir))
+//    val yellowDataset = dropNullValues(spark.read
+//      .parquet(Commons.getDatasetPath(deploymentMode, yellowDatasetDir)))
+//
+//    var dfPreprocessed = applyAllPreprocess(
+//      yellowDataset,
+//      sparkFilters,
+//      taxFilter,
+//      timeZones,
+//      "tpep_dropoff_datetime",
+//      "tpep_pickup_datetime"
+//    )
+//
+//    dfPreprocessed = binColByEqualQuantiles(
+//      getPercentage(
+//        dfPreprocessed, f"duration_minutes_$timeZoneOver", "duration_minutes"),
+//      f"duration_minutes_${timeZoneOver}_pcg", 20)
+//
+//    val datasetWithAvgDistanceCosts = dfPreprocessed
+//      .groupBy(colsForClassification.map(col): _*)
+//      .agg(round(avg("cost_per_distance"), 2).alias("avg_cost_per_distance"))
+//
+//    val datasetWithAvgTimeCosts = dfPreprocessed
+//      .groupBy(colsForClassification.map(col): _*)
+//      .agg(round(avg("cost_per_time"), 2).alias("avg_cost_per_time"))
+//
+//    val dfWithAvgCost = dfPreprocessed
+//      .join(datasetWithAvgDistanceCosts, colsForClassification, "left")
+//      .join(datasetWithAvgTimeCosts, colsForClassification, "left")
+//
+//    val dfWithPriceDiffPcg = binColByStepValue(
+//      binColByStepValue(
+//        addCostComparison(
+//          addCostComparison(
+//            dfWithAvgCost,
+//            "distance"),
+//          "time"
+//        ),
+//        "cost_per_distance_diff_pcg", 5
+//      ),
+//      "cost_per_time_diff_pcg", 5
+//    )
+//
+//    val totalCount = dfWithPriceDiffPcg.count()
+//
+//    val priceCols = Seq("time", "distance").map(feat => f"cost_per_${feat}_diff_pcg_bin_label")
+//    val relevantCols = colsForValuesAnalysis ++ priceCols
+//
+//    val reducedDfForAnalysis = dfWithPriceDiffPcg
+//      .select(relevantCols.map(col): _*)
+//
+//    val statsPerFeature = colsForValuesAnalysis.map { colName =>
+//      val groupCols = priceCols :+ colName
+//      reducedDfForAnalysis.groupBy(groupCols.map(col): _*)
+//        .agg(count("*").alias("count"))
+//        .withColumn("feature", lit(colName))
+//        .withColumn("value", col(colName).cast("string"))
+//        .withColumn("cost_distance_label", col("cost_per_distance_diff_pcg_bin_label"))
+//        .withColumn("cost_time_label", col("cost_per_time_diff_pcg_bin_label"))
+//        .withColumn("pcg", round(col("count") / totalCount.toDouble * 100, 2))
+//        .select("feature", "value", "count", "pcg", "cost_distance_label", "cost_time_label")
+//    }
+//
+//    val finalStatsDF = statsPerFeature.reduce(_ union _)
+//
+//    finalStatsDF
+//      .write
+//      .mode("overwrite")
+//      .parquet(Commons.getDatasetPath(deploymentMode, outputDir))
   }
 }
