@@ -1,4 +1,4 @@
-package jobs
+package jobs.second.df
 
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{DataFrame, SparkSession}
@@ -118,7 +118,8 @@ object SecondJob {
       col("fare_amount"),
       col("tip_amount"),
       col("payment_type"),
-      col("trip_distance")
+      col("trip_distance"),
+      col("total_amount")
     ).withColumn("service_type", lit("yellow"))
 
     val columnsGreen = greenDataset.select(
@@ -128,7 +129,8 @@ object SecondJob {
       col("fare_amount"),
       col("tip_amount"),
       col("payment_type"),
-      col("trip_distance")
+      col("trip_distance"),
+      col("total_amount")
     ).withColumn("service_type", lit("green"))
 
     val joined = columnsYellow.unionByName(columnsGreen)
@@ -222,6 +224,8 @@ object SecondJob {
           .when(col("hour_of_day").between(16, 19), "evening")
           .otherwise("night")
       )
+      .withColumn("month", month(col("pickup_datetime")))
+      .withColumn("year", year(col("pickup_datetime")))
       .withColumn("tip_percentage", (col("tip_amount") / col("total_amount")) * 100)
       .withColumn("speed_mph", col("trip_distance") / (col("trip_duration_min") / 60.0))
       .withColumn("is_rush_hour", col("hour_of_day").isin(8,9,15,16,17,18,19).cast("int"))
