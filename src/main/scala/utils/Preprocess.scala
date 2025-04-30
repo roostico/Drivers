@@ -137,10 +137,14 @@ object Preprocess {
 
           timeZones.foreach {
             case (label, (startHour, endHour)) if startHour > endHour =>
-              val bucketStartBeforeMidnight = current.withHour(startHour).withMinute(0)
-              val bucketEndBeforeMidnight = current.plusDays(1).withHour(0).withMinute(0)
-              val bucketStartAfterMidnight = bucketEndBeforeMidnight
-              val bucketEndAfterMidnight = current.plusDays(1).withHour(endHour).withMinute(0)
+              val bucketStartBeforeMidnight = current.withHour(startHour).withMinute(0).withSecond(0).withNano(0)
+              val bucketEndBeforeMidnight = current.withHour(23).withMinute(59).withSecond(59)
+              val bucketStartAfterMidnight = current.withHour(0).withMinute(0).withSecond(0).withNano(0)
+              val bucketEndAfterMidnight = current.withHour(endHour).withMinute(0).withSecond(0).withNano(0)
+//              val bucketStartBeforeMidnight = current.withHour(startHour).withMinute(0)
+//              val bucketEndBeforeMidnight = current.plusDays(1).withHour(0).withMinute(0)
+//              val bucketStartAfterMidnight = bucketEndBeforeMidnight
+//              val bucketEndAfterMidnight = current.plusDays(1).withHour(endHour).withMinute(0)
               
               val minutesBeforeMidnight = overlap(start, end, bucketStartBeforeMidnight, bucketEndBeforeMidnight)
               val minutesAfterMidnight = overlap(start, end, bucketStartAfterMidnight, bucketEndAfterMidnight)

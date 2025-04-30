@@ -119,19 +119,16 @@ for idx, file_path in enumerate(parquet_files):
         for _, row in df_splitted.iterrows():
             y = bin_to_y.get(row[f'{df_feat}_bin'], None)
             if y is not None:
+                x_val = row['value']
+                if isinstance(x_val, float) and x_val.is_integer():
+                    x_val = int(x_val)
                 ax.scatter(
-                    row['value'],
+                    x_val,
                     y,
                     s=size_scalar+row['pcg']*size_multiplier,
                     color=color,
                     alpha=0.6
                 )
-
-        ticks = ax.get_xticks()
-        labels = [label.get_text() for label in ax.get_xticklabels()]
-        if len(labels) > 10 or any(len(str(label)) > 5 for label in labels):
-            ax.set_xticks(ticks)
-            ax.set_xticklabels(labels, rotation=315, fontsize=8)
 
         # line "0"
         ymin, ymax = ax.get_ylim()
@@ -145,6 +142,24 @@ for idx, file_path in enumerate(parquet_files):
         loc='upper left',
         borderaxespad=0.
     )
+
+    def clean_label(label):
+        try:
+            num = float(label)
+            if num.is_integer():
+                return str(int(num))
+            return str(num)
+        except ValueError:
+            return label  # keep bin labels or non-numeric ones as they are
+
+    ticks = ax.get_xticks()
+    cleaned_labels = [clean_label(lbl.get_text()) for lbl in ax.get_xticklabels()]
+    if len(cleaned_labels) > 10 or any(len(str(label)) > 5 for label in cleaned_labels):
+        ax.set_xticks(ticks)
+        ax.set_xticklabels(cleaned_labels, rotation=315, fontsize=8)
+    else:
+        ax.set_xticks(ticks)
+        ax.set_xticklabels(cleaned_labels, fontsize=8)
 
 # Hide unused subplots if any
 for idx in range(files_number, rows * plot_per_row):
