@@ -10,9 +10,7 @@ def bin_label(label, step):
             return "unknown"
         val = int(nums[0])
 
-        if val <= -100:
-            return "<= -100"
-        elif val >= 100:
+        if val >= 100:
             return ">= 100"
         else:
             start = (val // step) * step
