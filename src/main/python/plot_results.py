@@ -24,7 +24,7 @@ max_bins_x = 15
 max_value_bin = 100
 
 # feat_name, step
-relevant_features = [('distance', 10), ('time', 10)]
+relevant_metrics = [('distance', 10), ('time', 10)]
 
 # Plot points' size calculated as m*val + q
 size_multiplier, size_scalar=2, 6
@@ -35,35 +35,48 @@ parquet_files = [
     if f.endswith('.parquet')
 ]
 
-files_number = len(parquet_files)
-rows = int(np.ceil(files_number / plot_per_row))
-features_number = len(relevant_features)
+# Load and concatenate all files
+df_all = pd.concat([pd.read_parquet(fp) for fp in parquet_files], ignore_index=True)
 
+# Drop NA globally (or inside loop if needed)
+df_all = df_all.dropna()
+
+relevant_features = df_all['feature'].unique()
+relevant_features.sort()
+
+# Group all dataframes by feature value
+feature_groups = {
+    feat: df_all[df_all['feature'] == feat].copy()
+    for feat in relevant_features
+}
+
+features_number = len(relevant_features)
+rows = int(np.ceil(features_number / plot_per_row))
 fig, axs = plt.subplots(rows, plot_per_row, figsize=(plot_per_row * 5, rows * 4), squeeze=False)
 
-# Iterate and read each file
-for idx, file_path in enumerate(parquet_files):
-    df = pd.read_parquet(file_path)
+for idx, feat_name in enumerate(relevant_features):
+    df = feature_groups.get(feat_name)
 
-    feature = df['feature'][0]
+    if df is None or df.empty:
+        continue  # Skip features not present
 
     df = df.dropna()
 
     df_split = {}
     admissible_bins = set()
 
-    for (feat_name, step) in relevant_features:
+    for (metric_name, step) in relevant_metrics:
 
         # If more bins than max x ticks, need to map in new bins
         if len(df['value'].unique()) > max_bins_x:
             df = bin_values(df, max_bins_x, max_value_bin)
 
         # Add binned columns
-        df[f'{feat_name}_bin'] = df[f'cost_{feat_name}_label'].apply(lambda x: bin_label(x, step=step))
+        df[f'{metric_name}_bin'] = df[f'cost_{metric_name}_label'].apply(lambda x: bin_label(x, step=step))
 
         df_splitted = (
-            df[['feature', 'value', 'count', f'{feat_name}_bin']]
-            .groupby(['feature', 'value', f'{feat_name}_bin'], observed=True)
+            df[['feature', 'value', 'count', f'{metric_name}_bin']]
+            .groupby(['feature', 'value', f'{metric_name}_bin'], observed=True)
             .agg({'count': 'sum'})
         )
 
@@ -84,9 +97,9 @@ for idx, file_path in enumerate(parquet_files):
         # Optionally drop the temp column
         df_splitted = df_splitted.drop(columns='sort_key')
 
-        df_split[feat_name] = df_splitted
+        df_split[metric_name] = df_splitted
 
-        admissible_bins.update(df_splitted[f'{feat_name}_bin'].dropna().unique())
+        admissible_bins.update(df_splitted[f'{metric_name}_bin'].dropna().unique())
 
     sorted_bins = sorted(admissible_bins, key=parse_bin)
 
@@ -96,9 +109,9 @@ for idx, file_path in enumerate(parquet_files):
     colors = plt.get_cmap('tab10', features_number)
 
     ax = axs[idx // plot_per_row][idx % plot_per_row]
-    ax.set_title(feature)
+    ax.set_title(feat_name)
     ax.set_ylabel("Diff from avg price [%]")
-    ax.set_xlabel("Value [%]" if 'pcg' in feature else 'Value')
+    ax.set_xlabel("Value [%]" if 'pcg' in feat_name else 'Value')
     ax.set_yticks(range(len(sorted_bins)))
 
     visible_labels = [label if i == 0 or i == len(sorted_bins)-1 or i % step_y_ticks == 0 else '' for i, label in enumerate(sorted_bins)]
@@ -162,8 +175,8 @@ for idx, file_path in enumerate(parquet_files):
         ax.set_xticklabels(cleaned_labels, fontsize=8)
 
 # Hide unused subplots if any
-for idx in range(files_number, rows * plot_per_row):
-    fig.delaxes(axs[idx // plot_per_row][idx % plot_per_row])
+# for idx in range(files_number, rows * plot_per_row):
+#    fig.delaxes(axs[idx // plot_per_row][idx % plot_per_row])
 
 fig.tight_layout()
 plt.subplots_adjust(right=0.8)

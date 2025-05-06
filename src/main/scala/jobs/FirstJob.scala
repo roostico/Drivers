@@ -1,12 +1,14 @@
 package jobs
 
-import jobs.DebugRDD.debugLim
+import jobs.DebugRDD.debugDumpRdd
+import jobs.FirstJobConfigs.decimals
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.types.{DoubleType, IntegerType, StringType, StructField, StructType}
 
 import java.time.{DayOfWeek, Duration, LocalDate, LocalDateTime}
 import java.time.format.DateTimeFormatter
 import org.apache.spark.sql.{Row, SparkSession}
+import org.apache.spark.storage.StorageLevel
 import utils._
 
 import java.time.temporal.ChronoUnit
@@ -14,6 +16,8 @@ import scala.language.postfixOps
 import scala.math.BigDecimal.RoundingMode
 
 object FirstJobConfigs {
+  val DEBUG: Boolean = false
+  val decimals: Int = 4
   val datasetDir = "/dataset"
   val outputDir = "/output/firstJobOutput"
   val yellowDatasetDir = s"$datasetDir/dataset_yellow"
@@ -23,8 +27,8 @@ object FirstJobConfigs {
   val datasetDirMap: Map[String, String] = Map("yellow" -> yellowDatasetDir, "green" -> greenDatasetDir,
     "fhv" -> fhvDatasetDir, "fhvhv" -> fhvhvDatasetDir)
   val datasetIterator: Iterable[(String, String, String)] = Seq(
-    ("green", "lpep_dropoff_datetime", "lpep_pickup_datetime"),
     ("yellow", "tpep_dropoff_datetime", "tpep_pickup_datetime"),
+    ("green", "lpep_dropoff_datetime", "lpep_pickup_datetime"),
     //("fhv", "tpep_dropoff_datetime", "tpep_pickup_datetime"),
     //("fhvhv", "tpep_dropoff_datetime", "tpep_pickup_datetime"),
   )
@@ -211,7 +215,7 @@ object ProcessRDD {
                     start2: LocalDateTime, end2: LocalDateTime): Double = {
           val overlapStart = if (start1.isAfter(start2)) start1 else start2
           val overlapEnd = if (end1.isBefore(end2)) end1 else end2
-          if (overlapEnd.isAfter(overlapStart)) BigDecimal(ChronoUnit.MILLIS.between(overlapStart, overlapEnd) / 60000.0).setScale(2, RoundingMode.HALF_UP).toDouble   else 0
+          if (overlapEnd.isAfter(overlapStart)) BigDecimal(ChronoUnit.MILLIS.between(overlapStart, overlapEnd) / 60000.0).setScale(decimals, RoundingMode.HALF_UP).toDouble   else 0
         }
 
         while (!current.isAfter(end)) {
@@ -268,6 +272,10 @@ object ProcessRDD {
 }
 
 object DebugRDD {
+
+  def debugDumpRdd[A](rdd: RDD[A], name: String): Unit = {
+    rdd.take(1).foreach(row => println(name + " " + row))
+  }
 
   def debugLim(rdd: RDD[Row], filterFunc: Seq[String] => Row => Boolean, features: Seq[String], headers: Seq[String]): Unit = {
     features.foreach(col => print(col + ", "))
@@ -330,6 +338,10 @@ object FirstJob {
         }
       }
 
+      if (DEBUG) {
+        debugDumpRdd(rddPreprocessed, "After rddPreprocessed")
+      }
+
       val rddWithDurationAndYear = rddPreprocessed.map { row =>
         val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm[:ss]")
 
@@ -340,7 +352,7 @@ object FirstJob {
         val dropoffTS = LocalDateTime.parse(dropoffStr, formatter)
         val durationMillis = Duration.between(pickupTS, dropoffTS).toMillis
         val durationMinutes = BigDecimal(durationMillis / 60000.0)
-          .setScale(2, RoundingMode.HALF_UP)
+          .setScale(decimals, RoundingMode.HALF_UP)
           .toDouble
 
         val pickupYear = pickupTS.getYear
@@ -353,6 +365,10 @@ object FirstJob {
 
       val rddWithDurationBin = binColByStepValue(rddWithDurationAndYear, headers.indexOf(colDurationMinutes), 5)
       headers = headers :+ colDurationMinutesBinLabel
+
+      if (DEBUG) {
+        debugDumpRdd(rddWithDurationBin, "After rddWithDurationBin")
+      }
 
       val rddWithTimeZones = rddWithDurationBin.map { row =>
         val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm[:ss]")
@@ -369,7 +385,7 @@ object FirstJob {
         val colsToAdd: Seq[Double] = timeZones.keys.toSeq.flatMap { tz =>
           val duration = timeZonesDuration.getOrElse(tz, 0.0)
           val totalDuration = row.getAs[Double](headers.indexOf(colDurationMinutes))
-          Seq(duration, BigDecimal(duration * 100 / totalDuration).setScale(2, RoundingMode.HALF_UP).toDouble)
+          Seq(duration, BigDecimal(duration * 100 / totalDuration).setScale(decimals, RoundingMode.HALF_UP).toDouble)
         }
 
         Row.fromSeq((row.toSeq ++ colsToAdd) :+ weekday_surcharge)
@@ -381,6 +397,10 @@ object FirstJob {
 
       headers = headers ++ headersToAdd
 
+      if (DEBUG) {
+        debugDumpRdd(rddWithTimeZones, "After rddWithTimeZones")
+      }
+
       val rddWithAggregateFees = rddWithTimeZones.map { row =>
         val fees = colFees.filter(col =>
           headers.contains(col.toLowerCase)).map(col => row.getAs[Double](headers.indexOf(col.toLowerCase))).sum
@@ -390,9 +410,17 @@ object FirstJob {
 
       headers = headers :+ colAggregateFee
 
+      if (DEBUG) {
+        debugDumpRdd(rddWithAggregateFees, "After rddWithAggregateFees")
+      }
+
       val rddWithAggregateFeesBin = binColByStepValue(rddWithAggregateFees, headers.indexOf(colAggregateFee), 2)
 
       headers = headers :+ colAggregateFeeBin
+
+      if (DEBUG) {
+        debugDumpRdd(rddWithAggregateFeesBin, "After rddWithAggregateFeesBin")
+      }
 
       val rddWithPriceDistanceAndTime = rddWithAggregateFeesBin.map { row =>
         val pricePerTime = Math.round(row.getAs[Double](headers.indexOf(colFareAmount)) / row.getAs[Double](headers.indexOf(colDurationMinutes)) * 100) / 100.0
@@ -403,9 +431,17 @@ object FirstJob {
 
       headers = headers ++ Seq(colPricePerTime, colPricePerDistance)
 
+      if (DEBUG) {
+        debugDumpRdd(rddWithPriceDistanceAndTime, "After rddWithPriceDistanceAndTime")
+      }
+
       val rddDurationBin = binColByStepValue(rddWithPriceDistanceAndTime, headers.indexOf("trip_distance"), 5)
 
       headers = headers :+ colDistanceBin
+
+      if (DEBUG) {
+        debugDumpRdd(rddDurationBin, "After rddDurationBin")
+      }
 
       val rddTZDurationPcgLabel = binColByStepValue(rddDurationBin, headers.indexOf(colDurationOvernightPcg), 5)
 
@@ -413,39 +449,76 @@ object FirstJob {
 
       val actualHeader = headers
 
+      if (DEBUG) {
+        debugDumpRdd(rddTZDurationPcgLabel, "After rddTZDurationPcgLabel")
+      }
+
       val rddWithKey = rddTZDurationPcgLabel.map { row =>
-        val key = colsForClassification.filter(col => actualHeader.contains(col.toLowerCase)).map(col => row.get(headers.indexOf(col.toLowerCase))).mkString("_")
+        val key = colsForClassification
+          .filter(col => actualHeader.contains(col.toLowerCase))
+          .map(col => row.get(actualHeader.indexOf(col.toLowerCase)))
+          .mkString("_")
         (key, row)
       }
 
-      headers = Seq("key") ++ headers
+//      val rddAvgPrices = rddWithKey
+//        .map { case (key, originalRow) =>
+//          val row = Row.fromSeq(originalRow.toSeq)
+//          val costPerDistance = row.getAs[Double](headers.indexOf(colPricePerDistance))
+//          val costPerTime = row.getAs[Double](headers.indexOf(colPricePerTime))
+//
+//          (key, (costPerDistance, costPerTime, 1)) // attach counts for averaging
+//        }
+//        .reduceByKey { (a, b) =>
+//          // Sum cost_per_distance, cost_per_time, and counts
+//          (a._1 + b._1, a._2 + b._2, a._3 + b._3)
+//        }
+//        .mapValues { case (totalCostPerDistance, totalCostPerTime, count) =>
+//          val avgCostPerDistance = BigDecimal(totalCostPerDistance / count).setScale(2, BigDecimal.RoundingMode.HALF_UP).toDouble
+//          val avgCostPerTime = BigDecimal(totalCostPerTime / count).setScale(2, BigDecimal.RoundingMode.HALF_UP).toDouble
+//          (avgCostPerDistance, avgCostPerTime)
+//        }
+//        .filter { case (_, (avgDistance, avgTime)) =>
+//          avgDistance > 0 && avgTime > 0
+//        }
 
-      val rddAvgPrices = rddWithKey
-        .map { case (key, originalRow) =>
-          val row = Row.fromSeq(originalRow.toSeq)
+      val rddWithKeyForAvg = rddWithKey
+        .mapValues { row =>
           val costPerDistance = row.getAs[Double](headers.indexOf(colPricePerDistance))
           val costPerTime = row.getAs[Double](headers.indexOf(colPricePerTime))
+          (costPerDistance, costPerTime, 1L)
+        }
+        .persist(StorageLevel.MEMORY_AND_DISK_SER)
 
-          (key, (costPerDistance, costPerTime, 1)) // attach counts for averaging
+      rddWithKeyForAvg.count()
+
+      val rddAvgPrices = rddWithKeyForAvg
+        .aggregateByKey((0.0, 0.0, 0L))(
+          (acc, v) => (acc._1 + v._1, acc._2 + v._2, acc._3 + v._3),
+          (a, b) => (a._1 + b._1, a._2 + b._2, a._3 + b._3)
+        )
+        .mapValues { case (sumDist, sumTime, count) =>
+          val avgDist = BigDecimal(sumDist / count).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
+          val avgTime = BigDecimal(sumTime / count).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
+          (avgDist, avgTime)
         }
-        .reduceByKey { (a, b) =>
-          // Sum cost_per_distance, cost_per_time, and counts
-          (a._1 + b._1, a._2 + b._2, a._3 + b._3)
-        }
-        .mapValues { case (totalCostPerDistance, totalCostPerTime, count) =>
-          val avgCostPerDistance = BigDecimal(totalCostPerDistance / count).setScale(2, BigDecimal.RoundingMode.HALF_UP).toDouble
-          val avgCostPerTime = BigDecimal(totalCostPerTime / count).setScale(2, BigDecimal.RoundingMode.HALF_UP).toDouble
-          (avgCostPerDistance, avgCostPerTime)
-        }
-        .filter { case (_, (avgDistance, avgTime)) =>
-          avgDistance > 0 && avgTime > 0
-        }
+        .filter { case (_, (dist, time)) => dist > 0 && time > 0 }
+
+      rddWithKeyForAvg.unpersist()
+
+      if (DEBUG) {
+        debugDumpRdd(rddAvgPrices, "After rddAvgPrices")
+      }
 
       val rddJoined = rddWithKey.join(rddAvgPrices).map { case (_, (originalRow, (avgCostPerDistance, avgCostPerTime))) =>
         Row.fromSeq(originalRow.toSeq ++ Seq(avgCostPerDistance, avgCostPerTime))
       }
 
-      headers = headers.drop(1) ++ Seq(colAvgPricePerDistance, colAvgPricePerTime)
+      headers = headers ++ Seq(colAvgPricePerDistance, colAvgPricePerTime)
+
+      if (DEBUG) {
+        debugDumpRdd(rddJoined, "After rddJoined")
+      }
 
       val rddPriceComparisons = rddJoined.map { row =>
         val priceColsToAdd: Seq[Double] =
@@ -453,8 +526,8 @@ object FirstJob {
             .flatMap { case (colPrice, colAvgPrice) =>
               val price = row.getAs[Double](headers.indexOf(colPrice))
               val priceAvg = row.getAs[Double](headers.indexOf(colAvgPrice))
-              val priceDiff = BigDecimal(price - priceAvg).setScale(2, BigDecimal.RoundingMode.HALF_UP).toDouble
-              val priceDiffPcg = BigDecimal(priceDiff / priceAvg * 100).setScale(2, BigDecimal.RoundingMode.HALF_UP).toDouble
+              val priceDiff = BigDecimal(price - priceAvg).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
+              val priceDiffPcg = BigDecimal(priceDiff / priceAvg * 100).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
 
               Seq(priceDiff, priceDiffPcg)
             }
@@ -463,6 +536,10 @@ object FirstJob {
       }
 
       headers = headers ++ Seq(colPricePerDistanceDiff, colPricePerDistanceDiffPcg, colPricePerTimeDiff, colPricePerTimeDiffPcg)
+
+      if (DEBUG) {
+        debugDumpRdd(rddPriceComparisons, "After rddPriceComparisons")
+      }
 
       val rddPriceDiffPcgBin = binColByStepValue(
         binColByStepValue(
@@ -473,10 +550,13 @@ object FirstJob {
 
       headers = headers ++ Seq(colPricePerDistanceDiffPcgLabel, colPricePerTimeDiffPcgLabel)
 
-      val underLimit: Double = -80
-      val features: Seq[String] = Seq("trip_distance", colDurationMinutes, "fare_amount", "total_amount", colPricePerTime, colAvgPricePerTime, colPricePerTimeDiffPcgLabel, colPricePerDistance, colAvgPricePerDistance, colPricePerDistanceDiffPcgLabel)
+      if (DEBUG) {
+        debugDumpRdd(rddPriceDiffPcgBin, "After rddPriceDiffPcgBin")
+      }
 
-      // trip_distance, duration_minutes, fare_amount, total_amount, cost_per_time, avg_cost_per_time, cost_per_time_diff_pcg_label, cost_per_distance, avg_cost_per_distance, cost_per_distance_diff_pcg_label
+//      val underLimit: Double = -80
+//      val features: Seq[String] = Seq("trip_distance", colDurationMinutes, "fare_amount", "total_amount", colPricePerTime, colAvgPricePerTime, colPricePerTimeDiffPcgLabel, colPricePerDistance, colAvgPricePerDistance, colPricePerDistanceDiffPcgLabel)
+
 //      debugLim(rddPriceDiffPcgBin,
 //        headersSeq =>
 //          row => row.getAs[Double](headersSeq.indexOf(colPricePerDistanceDiffPcg)) < underLimit ||
@@ -506,10 +586,14 @@ object FirstJob {
             val value = keySeq.last.toString
             val costDistLabel = keySeq(0).toString
             val costTimeLabel = keySeq(1).toString
-            val pcg = BigDecimal(count.toDouble / totalCount * 100).setScale(2, BigDecimal.RoundingMode.HALF_UP).toDouble
+            val pcg = BigDecimal(count.toDouble / totalCount * 100).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
             Row.fromSeq(Seq(colName, value, count, pcg, costDistLabel, costTimeLabel))
           }
         grouped
+      }
+
+      if (DEBUG) {
+        debugDumpRdd(rddFeatures(0), "After rddFeatures")
       }
 
       val headersForSchema = Seq(
