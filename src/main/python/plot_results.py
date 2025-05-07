@@ -7,10 +7,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import re
 import matplotlib.patches as mpatches
+from pyspark.sql import SparkSession
+import argparse
+import io
+import s3fs
 
 load_dotenv()
-
-result_dir = os.getenv('RESULTS_DIR')
 
 # Graphs per row
 plot_per_row = 2
@@ -29,14 +31,25 @@ relevant_metrics = [('distance', 10), ('time', 10)]
 # Plot points' size calculated as m*val + q
 size_multiplier, size_scalar=2, 6
 
-parquet_files = [
-    os.path.join(result_dir, f)
-    for f in os.listdir(result_dir)
-    if f.endswith('.parquet')
-]
+parser = argparse.ArgumentParser(description="Parse arg for remote configurations.")
+parser.add_argument('--remote', action='store_true', help='Read files from s3')
 
-# Load and concatenate all files
-df_all = pd.concat([pd.read_parquet(fp) for fp in parquet_files], ignore_index=True)
+args = parser.parse_args()
+
+if args.remote:
+    s3_path = f's3://{os.getenv("BUCKET")}/{os.getenv("OUTPUT_DIR")}/{os.getenv("DATASET")}'
+    df_all = pd.read_parquet(s3_path, engine='pyarrow')
+else:
+    result_dir = f'{os.getenv("OUTPUT_PATH")}/{os.getenv("OUTPUT_DIR")}/{os.getenv("DATASET")}'
+
+    parquet_files = [
+        os.path.join(result_dir, f)
+        for f in os.listdir(result_dir)
+        if f.endswith('.parquet')
+    ]
+
+    # Load and concatenate all files
+    df_all = pd.concat([pd.read_parquet(fp) for fp in parquet_files], ignore_index=True)
 
 # Drop NA globally (or inside loop if needed)
 df_all = df_all.dropna()
@@ -180,6 +193,20 @@ for idx, feat_name in enumerate(relevant_features):
 
 fig.tight_layout()
 plt.subplots_adjust(right=0.8)
-plt.savefig(f"{os.path.join(result_dir + '/graphs.pdf')}", format='pdf')
-plt.show()
 
+result_file_name = 'graphs.pdf'
+
+if args.remote:
+    # Save to in-memory buffer
+    buf = io.BytesIO()
+    plt.savefig(buf, format='pdf')
+    buf.seek(0)
+
+    # Upload to S3
+    fs = s3fs.S3FileSystem()
+    with fs.open(f'{s3_path}/{result_file_name}', 'wb') as f:
+        f.write(buf.read())
+else:
+    plt.savefig(f"{os.path.join(f'{result_dir}/{result_file_name}')}", format='pdf')
+
+plt.show()

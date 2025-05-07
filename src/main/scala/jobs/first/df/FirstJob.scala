@@ -1,13 +1,13 @@
-package jobs
+package jobs.first.df
 
-import org.apache.spark.sql.{Column, SparkSession}
-import utils._
-import utils.Preprocess.{addCostComparison, applyAllPreprocess, binColByEqualQuantiles, binColByStepValue, dropNullValues, getPercentage}
 import org.apache.spark.sql.functions._
+import org.apache.spark.sql.{Column, SparkSession}
+import utils.Preprocess._
+import utils._
 
 import scala.language.postfixOps
 
-object FirstJobSQL {
+object FirstJob {
 
   private val datasetDir = "/dataset"
   private val yellowDatasetDir = s"$datasetDir/dataset_yellow"
