@@ -22,6 +22,8 @@ object DataClasses {
        rideWithMinutes: RideWithDurationMinutes,
        hourOfDay: Int,
        dayOfWeek: Int,
+       monthOfYear: Int,
+       year: Int,
        isWeekend: Int,
        tripHourBucket: String,
        tipPercentage: Double,

@@ -5,8 +5,6 @@ import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.types._
 import utils.Commons
 
-import java.sql.Timestamp
-
 
 object BinningHelperRDD {
 
@@ -191,6 +189,9 @@ object SecondJob {
 
       val hourOfDay = pickupCalendar.get(java.util.Calendar.HOUR_OF_DAY)
       val dayOfWeek = pickupCalendar.get(java.util.Calendar.DAY_OF_WEEK)
+      val monthOfYear = pickupCalendar.get(java.util.Calendar.MONTH)
+      val year = pickupCalendar.get(java.util.Calendar.YEAR)
+
       val isWeekend = if (dayOfWeek == java.util.Calendar.SATURDAY || dayOfWeek == java.util.Calendar.SUNDAY) 1 else 0
 
       val tripHourBucket = hourOfDay match {
@@ -213,6 +214,8 @@ object SecondJob {
         ride,
         hourOfDay,
         dayOfWeek,
+        monthOfYear,
+        year,
         isWeekend,
         tripHourBucket,
         tipPercentage,
@@ -292,11 +295,93 @@ object SecondJob {
         (
           key._1, key._2, key._3, key._4, key._5, key._6,
           sumTip / count,
+          sumDuration / count
+        )
+      }
+
+    val rushHourAnalysis = binned
+      .map { ride =>
+        val key = ride.enrichedInfo.isRushHour
+        val value = (
+          ride.enrichedInfo.rideWithMinutes.durationMinutes,
+          ride.enrichedInfo.tipPercentage,
+          ride.enrichedInfo.speedMph,
+          1L
+        )
+        (key, value)
+      }
+      .reduceByKey { case ((duration1, tipPct1, speed1, count1), (duration2, tipPct2, speed2, count2)) =>
+        (duration1 + duration2, tipPct1 + tipPct2, speed1 + speed2, count1 + count2)
+      }
+      .map { case (isRushHour, (sumDuration, sumTipPct, sumSpeed, count)) =>
+        (
+          isRushHour,
           sumDuration / count,
+          sumTipPct / count,
+          sumSpeed / count
+        )
+      }
+
+    val monthlyPattern = binned
+      .map { ride =>
+        val key = (ride.enrichedInfo.year, ride.enrichedInfo.monthOfYear)
+        val value = (
+          ride.enrichedInfo.rideWithMinutes.info.fareAmount,
+          ride.enrichedInfo.rideWithMinutes.info.tipAmount,
+          1L
+        )
+        (key, value)
+      }
+      .reduceByKey { case ((fare1, tip1, count1), (fare2, tip2, count2)) =>
+        (fare1 + fare2, tip1 + tip2, count1 + count2)
+      }
+      .map { case ((year, month), (sumFare, sumTip, count)) =>
+        (
+          year, month,
+          sumFare / count,
+          sumTip / count,
           count
         )
       }
 
-    allCombinationsImpact.take(20).foreach(println)
+
+    val allCombinationsImpactDf = allCombinationsImpact.toDF(
+      "fare_amount_bin",
+      "trip_distance_bin",
+      "trip_duration_min_bin",
+      "tip_percentage_bin",
+      "speed_mph_bin",
+      "trip_hour_bucket",
+      "avg_tip",
+      "avg_duration",
+      "count_trips"
+    )
+
+    val rushHourAnalysisDf = rushHourAnalysis.toDF(
+      "is_rush_hour",
+      "avg_duration",
+      "avg_tip_pct",
+      "avg_speed"
+    )
+
+    val monthlyPatternDf = monthlyPattern.toDF(
+      "year",
+      "month",
+      "avg_fare",
+      "avg_tip",
+      "total_trips"
+    )
+
+    allCombinationsImpactDf.write
+      .mode("overwrite")
+      .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/allCombinationsImpact"))
+
+    rushHourAnalysisDf.write
+      .mode("overwrite")
+      .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/rushHourAnalysis"))
+
+    monthlyPatternDf.write
+      .mode("overwrite")
+      .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/monthlyPattern"))
   }
 }
