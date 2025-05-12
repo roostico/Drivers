@@ -29,7 +29,7 @@ max_value_bin = 100
 relevant_metrics = [('distance', 10), ('time', 10)]
 
 # Plot points' size calculated as m*val + q
-size_multiplier, size_scalar=2, 6
+size_multiplier, size_scalar = 2, 6
 
 parser = argparse.ArgumentParser(description="Parse arg for remote configurations.")
 parser.add_argument('--remote', action='store_true', help='Read files from s3')
@@ -127,7 +127,8 @@ for idx, feat_name in enumerate(relevant_features):
     ax.set_xlabel("Value [%]" if 'pcg' in feat_name else 'Value')
     ax.set_yticks(range(len(sorted_bins)))
 
-    visible_labels = [label if i == 0 or i == len(sorted_bins)-1 or i % step_y_ticks == 0 else '' for i, label in enumerate(sorted_bins)]
+    visible_labels = [label if i == 0 or i == len(sorted_bins) - 1 or i % step_y_ticks == 0 else '' for i, label in
+                      enumerate(sorted_bins)]
 
     ax.set_yticklabels(visible_labels)
 
@@ -151,7 +152,7 @@ for idx, feat_name in enumerate(relevant_features):
                 ax.scatter(
                     x_val,
                     y,
-                    s=size_scalar+row['pcg']*size_multiplier,
+                    s=size_scalar + row['pcg'] * size_multiplier,
                     color=color,
                     alpha=0.6
                 )
@@ -169,6 +170,7 @@ for idx, feat_name in enumerate(relevant_features):
         borderaxespad=0.
     )
 
+
     def clean_label(label):
         try:
             num = float(label)
@@ -177,6 +179,7 @@ for idx, feat_name in enumerate(relevant_features):
             return str(num)
         except ValueError:
             return label  # keep bin labels or non-numeric ones as they are
+
 
     ticks = ax.get_xticks()
     cleaned_labels = [clean_label(lbl.get_text()) for lbl in ax.get_xticklabels()]

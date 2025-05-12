@@ -3,3 +3,8 @@ dotenv
 fsspec
 numpy
 matplotlib
+pyspark
+s3fs
+seaborn
+pyarrow
+fastparquet

@@ -1,0 +1,10 @@
+# .editorconfig
+root = true
+
+[*.scala]
+indent_style = space
+indent_size = 2
+
+[*.ipynb]
+indent_style = space
+indent_size = 2

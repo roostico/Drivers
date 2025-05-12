@@ -12,6 +12,7 @@ import java.time.{DayOfWeek, Duration, LocalDate, LocalDateTime}
 import scala.language.postfixOps
 import scala.math.BigDecimal.RoundingMode
 import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.HashPartitioner
 
 object FirstJobConfigs {
   val DEBUG: Boolean = false
@@ -25,8 +26,8 @@ object FirstJobConfigs {
   val datasetDirMap: Map[String, String] = Map("yellow" -> yellowDatasetDir, "green" -> greenDatasetDir,
     "fhv" -> fhvDatasetDir, "fhvhv" -> fhvhvDatasetDir)
   val datasetIterator: Iterable[(String, String, String)] = Seq(
-    ("green", "lpep_dropoff_datetime", "lpep_pickup_datetime"),
     ("yellow", "tpep_dropoff_datetime", "tpep_pickup_datetime"),
+    ("green", "lpep_dropoff_datetime", "lpep_pickup_datetime"),
     //("fhv", "tpep_dropoff_datetime", "tpep_pickup_datetime"),
     //("fhvhv", "tpep_dropoff_datetime", "tpep_pickup_datetime"),
   )
@@ -83,7 +84,7 @@ object FirstJobConfigs {
     "congestion_surcharge",
     "airport_fee")
 
-  val sparkFilters: Map[String, Any => Boolean] = Map(
+  val featureFilters: Map[String, Any => Boolean] = Map(
     "passenger_count" -> {
       case i: Int => i > 0
       case f: Float => val i = f.toInt; i > 0
@@ -169,7 +170,7 @@ object ProcessRDD {
         case i: Int => i.toDouble
         case d: Double => d
         case l: Long => l.toDouble
-        case s: String => try { s.toDouble } catch { case _ => Double.NaN }
+        case s: String => try { s.toDouble } catch { case _: Throwable => Double.NaN }
         case _ => Double.NaN
       }
 
@@ -343,7 +344,7 @@ object FirstJob {
       val rddPreprocessed = rddCleaned.filter { row =>
         headers.zip(row.toSeq).forall { case (header: String, value) =>
           val taxFilterCondition = if (colFees.contains(header.toLowerCase)) taxFilter(value) else true
-          sparkFilters.get(header.toLowerCase) match {
+          featureFilters.get(header.toLowerCase) match {
             case Some(filterFunc) => taxFilterCondition && filterFunc(value)
             case None => taxFilterCondition // no filter defined for this column, so accept it
           }
@@ -473,7 +474,8 @@ object FirstJob {
         (key, row)
       }
 
-      val numPartitions = 80
+      val numPartitions = spark.sparkContext.defaultParallelism
+      val partitioner = new HashPartitioner(numPartitions)
 
       val rddWithKeyForAvg = rddWithKey
         .mapValues { row =>
@@ -481,7 +483,7 @@ object FirstJob {
           val costPerTime = row.getAs[Double](headers.indexOf(colPricePerTime))
           (costPerDistance, costPerTime, 1L)
         }
-        .partitionBy(new org.apache.spark.HashPartitioner(numPartitions))
+        .partitionBy(partitioner)
         .persist(StorageLevel.MEMORY_AND_DISK)
 
       val rddAvgPrices = rddWithKeyForAvg
@@ -502,26 +504,13 @@ object FirstJob {
         debugDumpRdd(rddAvgPrices, "After rddAvgPrices")
       }
 
-      val smallMap = rddAvgPrices.collectAsMap().toMap
-      val broadcastSmallMap: Broadcast[Map[String, (Double, Double)]] = spark.sparkContext.broadcast(smallMap)
+      val broadcastAvgPrices: Broadcast[Map[String, (Double, Double)]] = spark.sparkContext.broadcast(rddAvgPrices.collectAsMap().toMap)
 
       val rddJoined = rddWithKey.flatMap { case (key, originalRow) =>
-        broadcastSmallMap.value.get(key).map { case (avgCostPerDistance, avgCostPerTime) =>
+        broadcastAvgPrices.value.get(key).map { case (avgCostPerDistance, avgCostPerTime) =>
           Row.fromSeq(originalRow.toSeq ++ Seq(avgCostPerDistance, avgCostPerTime))
         }
       }
-
-//      val numPartitions = 200  // Tune based on your cluster size
-//      val rddWithKeyRepart = rddWithKey.repartition(numPartitions)
-//      val rddAvgPricesRepart = rddAvgPrices.repartition(numPartitions)
-//
-//      val rddJoined = rddWithKeyRepart.join(rddAvgPricesRepart).map { case (_, (originalRow, (avgCostPerDistance, avgCostPerTime))) =>
-//        Row.fromSeq(originalRow.toSeq ++ Seq(avgCostPerDistance, avgCostPerTime))
-//      }
-//
-//      val rddJoined = rddWithKey.join(rddAvgPrices).map { case (_, (originalRow, (avgCostPerDistance, avgCostPerTime))) =>
-//        Row.fromSeq(originalRow.toSeq ++ Seq(avgCostPerDistance, avgCostPerTime))
-//      }
 
       headers = headers ++ Seq(colAvgPricePerDistance, colAvgPricePerTime)
 
