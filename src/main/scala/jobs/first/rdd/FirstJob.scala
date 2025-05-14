@@ -415,8 +415,9 @@ object FirstJob {
       }
 
       val rddWithAggregateFees = rddWithTimeZones.map { row =>
-        val fees = colFees.filter(col =>
-          headers.contains(col.toLowerCase)).map(col => row.getAs[Double](headers.indexOf(col.toLowerCase))).sum
+        val fees = colFees
+          .filter(col => headers.contains(col.toLowerCase))
+          .map(col => row.getAs[Double](headers.indexOf(col.toLowerCase))).sum
 
         Row.fromSeq(row.toSeq :+ fees)
       }
@@ -555,7 +556,7 @@ object FirstJob {
       val headersForAnalysis = headers.filter(head => colsForClassification.contains(head.toLowerCase))
 
       val rddForAnalysis = rddPriceDiffPcgBin.map { row =>
-        Row.fromSeq(headersForAnalysis.map(head => row.get(headers.indexOf(head))))
+        Row.fromSeq(headersForAnalysis.indices.map(row.get))
       }
 
       val totalCount = rddForAnalysis.count()
@@ -565,7 +566,7 @@ object FirstJob {
 
         val grouped = rddForAnalysis
           .map { row =>
-            val key = groupCols.map(col => {row.get(headersForAnalysis.indexOf(col.toLowerCase))})
+            val key = groupCols.map(col => row.get(headersForAnalysis.indexOf(col.toLowerCase)))
             (key, 1)
           }
           .reduceByKey(_ + _)
