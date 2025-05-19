@@ -27,7 +27,7 @@ object FirstJobConfigs {
     "fhv" -> fhvDatasetDir, "fhvhv" -> fhvhvDatasetDir)
   val datasetIterator: Iterable[(String, String, String)] = Seq(
     ("yellow", "tpep_dropoff_datetime", "tpep_pickup_datetime"),
-    ("green", "lpep_dropoff_datetime", "lpep_pickup_datetime"),
+    //("green", "lpep_dropoff_datetime", "lpep_pickup_datetime"),
     //("fhv", "tpep_dropoff_datetime", "tpep_pickup_datetime"),
     //("fhvhv", "tpep_dropoff_datetime", "tpep_pickup_datetime"),
   )
@@ -553,10 +553,15 @@ object FirstJob {
         debugDumpRdd(rddPriceDiffPcgBin, "After rddPriceDiffPcgBin")
       }
 
-      val headersForAnalysis = headers.filter(head => colsForClassification.contains(head.toLowerCase))
+      //val headersForAnalysis = headers.filter(head => colsForClassification.contains(head.toLowerCase))
+
+      val headersForAnalysis = headers.zipWithIndex.filter(head => colsForClassification.contains(head._1.toLowerCase))
+
+      val headersForAnalysisIdxs = headersForAnalysis.map(_._2)
+      val headersForAnalysisCols = headersForAnalysis.map(_._1)
 
       val rddForAnalysis = rddPriceDiffPcgBin.map { row =>
-        Row.fromSeq(headersForAnalysis.indices.map(row.get))
+        Row.fromSeq(headersForAnalysisIdxs.map(row.get))
       }
 
       val totalCount = rddForAnalysis.count()
@@ -566,7 +571,7 @@ object FirstJob {
 
         val grouped = rddForAnalysis
           .map { row =>
-            val key = groupCols.map(col => row.get(headersForAnalysis.indexOf(col.toLowerCase)))
+            val key = groupCols.map(col => row.get(headersForAnalysisCols.indexOf(col.toLowerCase)))
             (key, 1)
           }
           .reduceByKey(_ + _)
