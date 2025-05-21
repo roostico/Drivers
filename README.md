@@ -8,7 +8,7 @@ Big Data Project A.Y. 2024/2025
 
 [New York City Taxi Dataset](https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page)
 
-All yellow, green, fhv and fhvhv datasets will be analyzed.
+Only yellow and green datasets will be analyzed.
 
 # First job - Anomaly detection
 
@@ -16,10 +16,10 @@ First job consists of the following steps:
 
 - Dataset cleanup
 - Discretization of continuous features
-- Select features to categorize data in classes, then calculate average prices as price per mile ($ / miles)
-- Define bins representing price slack w.r.t. average prices (e.g. avg_price | avg_price + 5 | avg_price + 10 | ...)
-- Establish a subset of discrete features not used in categorization and bins
-- For each feature bins, calculate the impact percentage of data points that fall into each price bin for every possible combination of values
+- Select features to categorize data in classes, then calculate average prices per distance and per time ($ / mile || $ / minute)
+- Define bins representing price difference w.r.t. average prices (e.g. avg_price | avg_price + 5 | avg_price + 10 | ...)
+- Establish a subset of discrete features
+- For each feature bins, calculate the percentage of data points that fall into each price bin for every possible combination of values
 - Results visualization through appropriate graphs
 
 # Second job - Features impact on tips
@@ -103,22 +103,6 @@ Before launch: Upload Files Through SFTP
 It is also possible to add a before launch command, triggering gradle build task to force building before running
 
 ## TODO
-Clean up dataset (scartare dati con attributi nulli/sporchi)
-
-Anomaly detection job
-
-N passeggeri | fascia oraria | Trip_distance | Date[YY/YY-MM] | Trip_duration (fasce) | Fare_amount (fasce) | Total_amount (fasce) -> costo medio ($ / miles)
-
-1 | 10-18 | 20-30 miles | 2022 | 30 - 45 minuti | 20-25 $ | 25-30$  -> 10$ / miles
-
- -> differenza dal costo medio
-
-1 | Y | 1  | 100 - 125$ -> +5
-
-RatecodeId 1 -> tot % corse prezzo medio + 5 < prezzo < prezzo medio +10
-Store_and_fwd_flag Y -> tot % corse prezzo medio + 5 < prezzo < prezzo medio +10
-
-
 
 Features bin change impact on tips
 
@@ -126,5 +110,3 @@ costo medio ($ / miles) (fasce) | Total_fees (Total_amount - Fare_amount - Tip_a
 
 10 $ / miles | 2 - 5 $ | 30 - 40 minuti | 20 - 30 miles -> 3$
 10 $ / miles | 2 - 5 $ | 30 - 40 minuti | 30 - 40 miles -> 5$
-
-
