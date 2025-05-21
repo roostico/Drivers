@@ -18,8 +18,6 @@ object BinningHelperRDD {
       else labels(idx)
     }
   }
-
-
 }
 
 object UtilFunctions {
@@ -52,7 +50,8 @@ object SecondJob {
     StructField("tip_amount", DoubleType),
     StructField("payment_type", LongType),
     StructField("trip_distance", DoubleType),
-    StructField("total_amount", DoubleType)
+    StructField("total_amount", DoubleType),
+    StructField("passenger_count", LongType)
   )
 
   private val schemaYellow = StructType(
@@ -66,6 +65,15 @@ object SecondJob {
     StructField("lpep_dropoff_datetime", TimestampType) ::
     commonFields
   )
+
+
+  private val valueExtractor : Map[String, RideWithBins => Any] =
+    Map(
+      "trip_distance" -> (_.enrichedInfo.rideWithMinutes.info.tripDistance),
+      "speed_mph" -> (_.enrichedInfo.speedMph),
+      "passenger_count" -> (_.enrichedInfo.rideWithMinutes.info.passengerCount),
+      "trip_duration_min" -> (_.enrichedInfo.rideWithMinutes.durationMinutes)
+    )
 
 
   def main(args: Array[String]): Unit = {
@@ -97,7 +105,8 @@ object SecondJob {
         $"tip_amount",
         $"payment_type",
         $"trip_distance",
-        $"total_amount"
+        $"total_amount",
+        $"passenger_count"
       )
       .na.drop()
       .dropDuplicates()
@@ -111,6 +120,7 @@ object SecondJob {
         r.getLong(5).toInt,
         r.getDouble(6),
         r.getDouble(7),
+        r.getLong(8).toInt,
         "yellow"
       ))
 
@@ -126,7 +136,8 @@ object SecondJob {
         $"tip_amount",
         $"payment_type",
         $"trip_distance",
-        $"total_amount"
+        $"total_amount",
+        $"passenger_count"
       )
       .na.drop()
       .dropDuplicates()
@@ -140,6 +151,7 @@ object SecondJob {
         r.getLong(5).toInt,
         r.getDouble(6),
         r.getDouble(7),
+        r.getLong(8).toInt,
         "green"
       ))
 
@@ -156,7 +168,6 @@ object SecondJob {
       .filter(ride => ride.paymentType >= 1 && ride.paymentType <= 6)
       .filter(ride => ride.tripDistance > 0)
       .filter(ride => ride.dropoffDatetime.after(ride.pickupDatetime))
-
 
     import DataClasses.RideWithDurationMinutes
 
@@ -345,6 +356,35 @@ object SecondJob {
       }
 
 
+//    binned.flatMap { rwb =>
+//      val extractValuesWithTip : (RideWithBins, String) => Option[(Any, Double)] = (rwb, col) =>
+//        for {
+//          extractor <- valueExtractor.get(col)
+//          value = extractor(rwb)
+//          tip = rwb.enrichedInfo.rideWithMinutes.info.tipAmount
+//        } yield (value, tip)
+//
+//
+//      valueExtractor.keySet.flatMap { column =>
+//        extractValuesWithTip(rwb, column).map {
+//          case (value, tipAmount) => (column, value, tipAmount)
+//        }
+//      }
+//    }
+//    .map { case (column, value, tip) => ((column, value), (tip, 1)) }
+//    .reduceByKey { case ((sum1, count1), (sum2, count2)) =>
+//      (sum1 + sum2, count1 + count2)
+//    }
+//    .mapValues { case (sum, count) => sum / count }
+//    .map {
+//      case ((column, bin), avgTip) =>
+//        (column, bin, avgTip)
+//    }
+//    .foreach(println)
+
+
+    //val perColumnValAndTipDF = perColumnValAndTip.toDF("column", "bin", "avg_tip")
+
     val allCombinationsImpactDf = allCombinationsImpact.toDF(
       "fare_amount_bin",
       "trip_distance_bin",
@@ -353,8 +393,7 @@ object SecondJob {
       "speed_mph_bin",
       "trip_hour_bucket",
       "avg_tip",
-      "avg_duration",
-      "count_trips"
+      "avg_duration"
     )
 
     val rushHourAnalysisDf = rushHourAnalysis.toDF(
@@ -372,15 +411,27 @@ object SecondJob {
       "total_trips"
     )
 
-    allCombinationsImpactDf.write
+//    perColumnValAndTipDF
+//      .coalesce(1)
+//      .write
+//      .mode("overwrite")
+//      .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/perColumnValAndTipDF"))
+
+    allCombinationsImpactDf
+      .coalesce(1)
+      .write
       .mode("overwrite")
       .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/allCombinationsImpact"))
 
-    rushHourAnalysisDf.write
+    rushHourAnalysisDf
+      .coalesce(1)
+      .write
       .mode("overwrite")
       .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/rushHourAnalysis"))
 
-    monthlyPatternDf.write
+    monthlyPatternDf
+      .coalesce(1)
+      .write
       .mode("overwrite")
       .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/monthlyPattern"))
   }

@@ -13,6 +13,7 @@ object DataClasses {
      paymentType: Int,
      tripDistance: Double,
      totalAmount: Double,
+     passengerCount: Int,
      serviceType: String
    )
 
