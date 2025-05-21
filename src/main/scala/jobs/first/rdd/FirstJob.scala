@@ -27,7 +27,7 @@ object FirstJobConfigs {
     "fhv" -> fhvDatasetDir, "fhvhv" -> fhvhvDatasetDir)
   val datasetIterator: Iterable[(String, String, String)] = Seq(
     ("yellow", "tpep_dropoff_datetime", "tpep_pickup_datetime"),
-    //("green", "lpep_dropoff_datetime", "lpep_pickup_datetime"),
+    ("green", "lpep_dropoff_datetime", "lpep_pickup_datetime"),
     //("fhv", "tpep_dropoff_datetime", "tpep_pickup_datetime"),
     //("fhvhv", "tpep_dropoff_datetime", "tpep_pickup_datetime"),
   )
@@ -552,8 +552,6 @@ object FirstJob {
       if (DEBUG) {
         debugDumpRdd(rddPriceDiffPcgBin, "After rddPriceDiffPcgBin")
       }
-
-      //val headersForAnalysis = headers.filter(head => colsForClassification.contains(head.toLowerCase))
 
       val headersForAnalysis = headers.zipWithIndex.filter(head => colsForClassification.contains(head._1.toLowerCase))
 
