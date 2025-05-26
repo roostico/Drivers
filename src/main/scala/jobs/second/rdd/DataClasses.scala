@@ -4,6 +4,13 @@ import java.sql.Timestamp
 
 object DataClasses {
 
+  case class WeatherInfo(
+     wmoCode: Int,
+     dateOfRelevation: Timestamp,
+     description: String
+  )
+
+
   case class Ride(
      vendorId: Int,
      pickupDatetime: Timestamp,
@@ -40,7 +47,18 @@ object DataClasses {
      fareAmountBin: String,
      tipPercentageBin: String,
      speedBin: String
-   )
+  )
+
+  case class RideWithWeather(
+    ride: DataClasses.RideWithBins,
+    weatherInfo: DataClasses.WeatherInfo
+  )
+
+  case class RideFinalOutput(
+    ride: DataClasses.RideWithBins,
+    weather: DataClasses.WeatherInfo,
+    generalWeather: String
+  )
 
 
 

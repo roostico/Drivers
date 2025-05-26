@@ -1,9 +1,11 @@
 package jobs.second.rdd
 
-import jobs.second.rdd.DataClasses.{RideWithBins, RideWithEnrichedInformation}
+import jobs.second.rdd.DataClasses.{RideFinalOutput, RideWithBins, RideWithEnrichedInformation, RideWithWeather}
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.types._
 import utils.Commons
+
 
 
 object BinningHelperRDD {
@@ -18,6 +20,18 @@ object BinningHelperRDD {
       else labels(idx)
     }
   }
+
+  def generalWeatherLabel(wmoCode: Int): String = wmoCode match {
+    case c if Seq(0, 1).contains(c)        => "clear"
+    case c if Seq(2, 3, 4).contains(c)     => "cloudy"
+    case c if Seq(45, 48).contains(c)      => "foggy"
+    case c if (50 to 67).contains(c)       => "rainy"
+    case c if (70 to 77).contains(c)       => "snowy"
+    case c if (80 to 99).contains(c)       => "stormy"
+    case _                                 => "unknown"
+  }
+
+
 }
 
 object UtilFunctions {
@@ -27,14 +41,15 @@ object UtilFunctions {
   }
 }
 
-
-
 object SecondJob {
 
   private val datasetFolder = "./dataset"
   private val outputDir = "/output/secondJobRDD"
   private val yellowCab = s"$datasetFolder/yellow_cab"
   private val greenCab = s"$datasetFolder/green_cab"
+
+  private val weatherData = s"$datasetFolder/weather/weather_data_2017_2024.csv"
+  private val weatherWmoLookup = s"$datasetFolder/weather/wmo_lookup_codes.csv"
 
   private val binConfigs = Map(
     "trip_distance" -> (Seq(1.0, 3.0, 6.0), Seq("0-1", "1-3", "3-6", "6+")),
@@ -66,14 +81,13 @@ object SecondJob {
     commonFields
   )
 
-
-  private val valueExtractor : Map[String, RideWithBins => Any] =
-    Map(
-      "trip_distance" -> (_.enrichedInfo.rideWithMinutes.info.tripDistance),
-      "speed_mph" -> (_.enrichedInfo.speedMph),
-      "passenger_count" -> (_.enrichedInfo.rideWithMinutes.info.passengerCount),
-      "trip_duration_min" -> (_.enrichedInfo.rideWithMinutes.durationMinutes)
-    )
+  private val binFields = Seq(
+    "tripDistanceBin",
+    "tripDurationBin",
+    "fareAmountBin",
+    "tipPercentageBin",
+    "speedBin"
+  )
 
 
   def main(args: Array[String]): Unit = {
@@ -89,6 +103,52 @@ object SecondJob {
     }
 
     val deploymentMode = args(0)
+
+    val weatherFileRDD = spark.read
+      .format("CSV")
+      .option("header", "true")
+      .load(Commons.getDatasetPath(deploymentMode, weatherData))
+      .rdd
+
+    // --> WMO Val, Date
+    val weatherPairRDD = weatherFileRDD.map { row =>
+      val code = row.getString(1).trim.toInt
+      val date = row.getString(0).trim
+      (code, date)
+    }
+
+    val wmoLookupFile = spark.read
+      .format("CSV")
+      .option("header", "true")
+      .load(Commons.getDatasetPath(deploymentMode, weatherWmoLookup))
+      .rdd
+
+
+    // --> WMO Val, Description
+    val wmoLookupPairRDD = wmoLookupFile.map { row =>
+      // Row is presenting like the following : (0;something)
+      val data = row.getString(0).split(";")
+      val code =data(0).trim.toInt
+      val description = data(1).trim
+      (code, description)
+    }
+
+
+    import DataClasses.WeatherInfo
+    import java.time.LocalDate
+    import java.sql.Timestamp
+
+    val transformedWeatherClassRDD = weatherPairRDD
+      .join(wmoLookupPairRDD)
+      .map(row => {
+        val (id, (date, description)) = row
+
+        val formattedDate  = LocalDate.parse(date)
+        val timestamp = Timestamp.valueOf(formattedDate.atStartOfDay())
+
+        WeatherInfo(id, timestamp, description)
+      })
+
 
 
     import DataClasses.Ride
@@ -282,157 +342,61 @@ object SecondJob {
           speedBin)
     }
 
-    val allCombinationsImpact = binned
-      .map { bins =>
-        val key = (
-          bins.fareAmountBin,
-          bins.tripDistanceBin,
-          bins.tripDurationBin,
-          bins.tipPercentageBin,
-          bins.speedBin,
-          bins.enrichedInfo.tripHourBucket
-        )
-        val value = (
-          bins.enrichedInfo.rideWithMinutes.info.tipAmount,
-          bins.enrichedInfo.rideWithMinutes.durationMinutes,
-          1L
-        )
-        (key, value)
-      }
-      .reduceByKey { case ((tip1, duration1, count1), (tip2, duration2, count2)) =>
-        (tip1 + tip2, duration1 + duration2, count1 + count2)
-      }
-      .map { case (key, (sumTip, sumDuration, count)) =>
-        (
-          key._1, key._2, key._3, key._4, key._5, key._6,
-          sumTip / count,
-          sumDuration / count
-        )
-      }
+    val weatherByDate = transformedWeatherClassRDD.map(w => (w.dateOfRelevation.toLocalDateTime.toLocalDate, w))
+    val rideByDate = binned.map(r => (r.enrichedInfo.rideWithMinutes.info.pickupDatetime.toLocalDateTime.toLocalDate, r))
 
-    val rushHourAnalysis = binned
-      .map { ride =>
-        val key = ride.enrichedInfo.isRushHour
-        val value = (
-          ride.enrichedInfo.rideWithMinutes.durationMinutes,
-          ride.enrichedInfo.tipPercentage,
-          ride.enrichedInfo.speedMph,
-          1L
-        )
-        (key, value)
-      }
-      .reduceByKey { case ((duration1, tipPct1, speed1, count1), (duration2, tipPct2, speed2, count2)) =>
-        (duration1 + duration2, tipPct1 + tipPct2, speed1 + speed2, count1 + count2)
-      }
-      .map { case (isRushHour, (sumDuration, sumTipPct, sumSpeed, count)) =>
-        (
-          isRushHour,
-          sumDuration / count,
-          sumTipPct / count,
-          sumSpeed / count
-        )
-      }
+    val joinedWeather = rideByDate.join(weatherByDate).map {
+      case (_, (ride, weather)) =>
+        RideWithWeather(ride, weather)
+    }
 
-    val monthlyPattern = binned
-      .map { ride =>
-        val key = (ride.enrichedInfo.year, ride.enrichedInfo.monthOfYear)
-        val value = (
-          ride.enrichedInfo.rideWithMinutes.info.fareAmount,
-          ride.enrichedInfo.rideWithMinutes.info.tipAmount,
-          1L
-        )
-        (key, value)
-      }
-      .reduceByKey { case ((fare1, tip1, count1), (fare2, tip2, count2)) =>
-        (fare1 + fare2, tip1 + tip2, count1 + count2)
-      }
-      .map { case ((year, month), (sumFare, sumTip, count)) =>
-        (
-          year, month,
-          sumFare / count,
-          sumTip / count,
-          count
-        )
-      }
+    val finalRDD = joinedWeather.map { r =>
+      val generalWeather = BinningHelperRDD.generalWeatherLabel(r.weatherInfo.wmoCode)
+      RideFinalOutput(r.ride, r.weatherInfo, generalWeather)
+    }
+
+    finalRDD.cache()
+
+    val binFieldPairs = for {
+      x <- binFields
+      y <- binFields
+    } yield (x, y)
 
 
-//    binned.flatMap { rwb =>
-//      val extractValuesWithTip : (RideWithBins, String) => Option[(Any, Double)] = (rwb, col) =>
-//        for {
-//          extractor <- valueExtractor.get(col)
-//          value = extractor(rwb)
-//          tip = rwb.enrichedInfo.rideWithMinutes.info.tipAmount
-//        } yield (value, tip)
-//
-//
-//      valueExtractor.keySet.flatMap { column =>
-//        extractValuesWithTip(rwb, column).map {
-//          case (value, tipAmount) => (column, value, tipAmount)
-//        }
-//      }
-//    }
-//    .map { case (column, value, tip) => ((column, value), (tip, 1)) }
-//    .reduceByKey { case ((sum1, count1), (sum2, count2)) =>
-//      (sum1 + sum2, count1 + count2)
-//    }
-//    .mapValues { case (sum, count) => sum / count }
-//    .map {
-//      case ((column, bin), avgTip) =>
-//        (column, bin, avgTip)
-//    }
-//    .foreach(println)
+    val combinationRDD: RDD[Row] = finalRDD.flatMap { row =>
+        binFieldPairs.map { case (x, y) =>
 
+          val matchVal : String => String = {
+            case "tripDistanceBin" => row.ride.tripDistanceBin
+            case "tripDurationBin" => row.ride.tripDurationBin
+            case "fareAmountBin" => row.ride.fareAmountBin
+            case "tipPercentageBin" => row.ride.tipPercentageBin
+            case "speedBin" => row.ride.speedBin
+          }
 
-    //val perColumnValAndTipDF = perColumnValAndTip.toDF("column", "bin", "avg_tip")
+          val binX = matchVal(x)
+          val binY = matchVal(y)
 
-    val allCombinationsImpactDf = allCombinationsImpact.toDF(
-      "fare_amount_bin",
-      "trip_distance_bin",
-      "trip_duration_min_bin",
-      "tip_percentage_bin",
-      "speed_mph_bin",
-      "trip_hour_bucket",
-      "avg_tip",
-      "avg_duration"
-    )
+          ((x, y, binX, binY), (row.ride.enrichedInfo.tipPercentage, 1L))
+        }
+    }
+    .reduceByKey((a, b) => (a._1 + b._1, a._2 + b._2))
+    .map { case ((fieldX, fieldY, binX, binY), (sumTip, count)) =>
+        Row(fieldX, fieldY, binX, binY, sumTip / count)
+    }
 
-    val rushHourAnalysisDf = rushHourAnalysis.toDF(
-      "is_rush_hour",
-      "avg_duration",
-      "avg_tip_pct",
-      "avg_speed"
-    )
+    val schema = StructType(Seq(
+      StructField("featureX", StringType),
+      StructField("featureY", StringType),
+      StructField("binX", StringType),
+      StructField("binY", StringType),
+      StructField("avg_tip_pct", DoubleType)
+    ))
 
-    val monthlyPatternDf = monthlyPattern.toDF(
-      "year",
-      "month",
-      "avg_fare",
-      "avg_tip",
-      "total_trips"
-    )
-
-//    perColumnValAndTipDF
-//      .coalesce(1)
-//      .write
-//      .mode("overwrite")
-//      .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/perColumnValAndTipDF"))
-
-    allCombinationsImpactDf
-      .coalesce(1)
+    spark.createDataFrame(combinationRDD, schema)
       .write
       .mode("overwrite")
-      .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/allCombinationsImpact"))
+      .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/combination_data"))
 
-    rushHourAnalysisDf
-      .coalesce(1)
-      .write
-      .mode("overwrite")
-      .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/rushHourAnalysis"))
-
-    monthlyPatternDf
-      .coalesce(1)
-      .write
-      .mode("overwrite")
-      .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/monthlyPattern"))
   }
 }
