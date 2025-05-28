@@ -360,12 +360,11 @@ object SecondJob {
     val binFieldPairs = for {
       x <- binFields
       y <- binFields
+      if x != y
     } yield (x, y)
-
 
     val combinationRDD: RDD[Row] = finalRDD.flatMap { row =>
         binFieldPairs.map { case (x, y) =>
-
           val matchVal : String => String = {
             case "tripDistanceBin" => row.ride.tripDistanceBin
             case "tripDurationBin" => row.ride.tripDurationBin
@@ -384,6 +383,35 @@ object SecondJob {
     .map { case ((fieldX, fieldY, binX, binY), (sumTip, count)) =>
         Row(fieldX, fieldY, binX, binY, sumTip / count)
     }
+
+
+    val allTipByBinRDD: RDD[Row] = finalRDD.flatMap { row =>
+        binFields.map { binFeature =>
+          val bin = binFeature match {
+            case "fareAmountBin" => row.ride.fareAmountBin
+            case "tripDistanceBin" => row.ride.tripDistanceBin
+            case "tripDurationBin" => row.ride.tripDurationBin
+            case "tipPercentageBin" => row.ride.tipPercentageBin
+            case "speedBin" => row.ride.speedBin
+          }
+          ((binFeature, bin), (row.ride.enrichedInfo.tipPercentage, 1L))
+        }
+      }
+      .reduceByKey((a, b) => (a._1 + b._1, a._2 + b._2))
+      .map { case ((feature, bin), (sumTip, count)) =>
+        Row(feature, bin, sumTip / count)
+      }
+
+    val allTipByBinSchema = StructType(Seq(
+      StructField("feature", StringType),
+      StructField("bin", StringType),
+      StructField("avg_tip_pct", DoubleType)
+    ))
+
+    spark.createDataFrame(allTipByBinRDD, allTipByBinSchema)
+      .write
+      .mode("overwrite")
+      .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/tip_avg_per_bin/all_features"))
 
     val schema = StructType(Seq(
       StructField("featureX", StringType),
