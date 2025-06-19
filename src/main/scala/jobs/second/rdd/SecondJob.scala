@@ -22,13 +22,13 @@ object BinningHelperRDD {
   }
 
   def generalWeatherLabel(wmoCode: Int): String = wmoCode match {
-    case c if Seq(0, 1).contains(c)        => "clear"
-    case c if Seq(2, 3, 4).contains(c)     => "cloudy"
-    case c if Seq(45, 48).contains(c)      => "foggy"
+    case c if Seq(0, 1).contains(c)              => "clear"
+    case c if Seq(2, 3, 4).contains(c)           => "cloudy"
+    case c if Seq(45, 48).contains(c)            => "foggy"
     case c if (50 to 67).contains(c)       => "rainy"
     case c if (70 to 77).contains(c)       => "snowy"
     case c if (80 to 99).contains(c)       => "stormy"
-    case _                                 => "unknown"
+    case _                                       => "unknown"
   }
 
 
@@ -402,6 +402,16 @@ object SecondJob {
         Row(feature, bin, sumTip / count)
       }
 
+    val avgTipByWeather = finalRDD
+      .map(r => (r.generalWeather, (r.ride.enrichedInfo.tipPercentage, 1L)))
+      .reduceByKey((a, b) => (a._1 + b._1, a._2 + b._2))
+      .map { case (weather, (sumTip, count)) => Row(weather, sumTip / count) }
+
+    val tipByHourBucket = finalRDD
+      .map(r => (r.ride.enrichedInfo.tripHourBucket, (r.ride.enrichedInfo.tipPercentage, 1L)))
+      .reduceByKey((a, b) => (a._1 + b._1, a._2 + b._2))
+      .map { case (bucket, (sumTip, count)) => Row(bucket, sumTip / count) }
+
     val allTipByBinSchema = StructType(Seq(
       StructField("feature", StringType),
       StructField("bin", StringType),
@@ -425,6 +435,28 @@ object SecondJob {
       .write
       .mode("overwrite")
       .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/combination_data"))
+
+
+    val weatherSchema = StructType(Seq(
+      StructField("weather", StringType),
+      StructField("avg_tip_pct", DoubleType)
+    ))
+
+    spark.createDataFrame(avgTipByWeather, weatherSchema)
+      .write
+      .mode("overwrite")
+      .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/avg_tip_by_weather"))
+
+    val bucketSchema = StructType(Seq(
+      StructField("hour_bucket", StringType),
+      StructField("avg_tip_pct", DoubleType)
+    ))
+
+    spark.createDataFrame(tipByHourBucket, bucketSchema)
+      .write
+      .mode("overwrite")
+      .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/avg_tip_by_hour_bucket"))
+
 
   }
 }

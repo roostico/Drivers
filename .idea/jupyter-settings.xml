@@ -7,7 +7,7 @@
           <value>
             <JupyterConnectionParameters>
               <option name="managed" value="true" />
-              <option name="sdkName" value="Python 3.11 (big-data-exam)" />
+              <option name="sdkName" value="Python 3.13 (lab-cse-24-25)" />
             </JupyterConnectionParameters>
           </value>
         </entry>

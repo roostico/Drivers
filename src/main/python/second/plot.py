@@ -4,9 +4,6 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import re
 
-
-
-
 def bin_sort_key(bin_label):
     bin_label = str(bin_label)
     label = bin_label.replace("%", "").replace("mph", "")
@@ -94,6 +91,41 @@ def heatmaps():
 
     pdf.close()
 
+def plot_avg_tip_by_weather():
+    df = pd.read_parquet(
+        "/Users/giovanniantonioni/IdeaProjects/Drivers/output/secondJobRDD/avg_tip_by_weather"
+    )
+    df = df.sort_values("avg_tip_pct", ascending=False)
+
+    plt.figure(figsize=(10, 6))
+    sns.barplot(data=df, x="weather", y="avg_tip_pct", palette="muted")
+    plt.title("Average Tip % by General Weather")
+    plt.ylabel("Average Tip Percentage")
+    plt.xlabel("Weather Condition")
+    plt.tight_layout()
+    plt.savefig("avg_tip_by_weather.pdf")
+    plt.close()
+
+def plot_avg_tip_by_hour_bucket():
+    df = pd.read_parquet(
+        "/Users/giovanniantonioni/IdeaProjects/Drivers/output/secondJobRDD/avg_tip_by_hour_bucket"
+    )
+
+    order = ["late_night", "morning", "midday", "evening", "night"]
+    df["hour_bucket"] = pd.Categorical(df["hour_bucket"], categories=order, ordered=True)
+    df = df.sort_values("hour_bucket")
+
+    plt.figure(figsize=(10, 6))
+    sns.barplot(data=df, x="hour_bucket", y="avg_tip_pct", palette="deep")
+    plt.title("Average Tip % by Hour Bucket")
+    plt.ylabel("Average Tip Percentage")
+    plt.xlabel("Hour Bucket")
+    plt.tight_layout()
+    plt.savefig("avg_tip_by_hour_bucket.pdf")
+    plt.close()
+
 if __name__ == "__main__":
     diff_matrix_heatmap()
     heatmaps()
+    plot_avg_tip_by_weather()
+    plot_avg_tip_by_hour_bucket()
