@@ -302,14 +302,14 @@ object DebugRDD {
   }
 }
 
-object FirstJob {
+object FirstJobOpt {
 
   import FirstJobConfigs._
   import ProcessRDD._
   import DebugRDD._
-  
+
   def main(args: Array[String]): Unit = {
-    
+
     val spark = SparkSession.builder
       .appName("First job")
       .getOrCreate()
@@ -322,6 +322,9 @@ object FirstJob {
     val deploymentMode = args(0)
 
     datasetIterator.foreach { ds =>
+
+      val startTime = System.currentTimeMillis()
+
       val name: String = ds._1
       val dropoff: String = ds._2
       val pickup: String = ds._3
@@ -599,6 +602,321 @@ object FirstJob {
       val schema = StructType(headersForSchema)
 
       val dfForAnalysis = spark.createDataFrame(rddFeatures.reduce(_ union _), schema)
+
+      dfForAnalysis.show(1)
+
+      val endTime = System.currentTimeMillis()
+      val durationMs = endTime - startTime
+      println(s"Job $name-dataset optimized executed in $durationMs ms")
+
+      dfForAnalysis
+        .write
+        .mode("overwrite")
+        .parquet(Commons.getDatasetPath(deploymentMode, outputDir + f"/$name"))
+    }
+  }
+}
+
+object FirstJob {
+
+  import FirstJobConfigs._
+  import ProcessRDD._
+  import DebugRDD._
+  
+  def main(args: Array[String]): Unit = {
+    
+    val spark = SparkSession.builder
+      .appName("First job")
+      .getOrCreate()
+
+    if (args.length == 0) {
+      println("The first parameter should indicate the deployment mode (\"local\" or \"remote\")")
+      return
+    }
+
+    val deploymentMode = args(0)
+
+    datasetIterator.foreach { ds =>
+
+      val startTime = System.currentTimeMillis()
+
+      val name: String = ds._1
+      val dropoff: String = ds._2
+      val pickup: String = ds._3
+
+      val dataset = spark.read
+        .parquet(Commons.getDatasetPath(deploymentMode, datasetDirMap(name)))
+
+      var headers: Seq[String] = dataset.columns.map(_.toLowerCase)
+
+      val indexesToUse: Seq[Int] = headers.zipWithIndex.collect {
+        case (h, i) if colToUse.contains(h.toLowerCase) => i
+      }
+
+      val rddCleaned = dataset.rdd.map { row =>
+        Row.fromSeq(indexesToUse.map(row.get).map(castForFilter))
+      }.filter(!_.toSeq.contains(null))
+
+      headers = headers.filter(head => colToUse.contains(head.toLowerCase))
+
+      val rddPreprocessed = rddCleaned.filter { row =>
+        headers.zip(row.toSeq).forall { case (header: String, value) =>
+          val taxFilterCondition = if (colFees.contains(header.toLowerCase)) taxFilter(value) else true
+          featureFilters.get(header.toLowerCase) match {
+            case Some(filterFunc) => taxFilterCondition && filterFunc(value)
+            case None => taxFilterCondition // no filter defined for this column, so accept it
+          }
+        }
+      }
+
+      if (DEBUG) {
+        debugDumpRdd(rddPreprocessed, "After rddPreprocessed")
+      }
+
+      val rddWithDurationAndYear = rddPreprocessed.map { row =>
+        val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm[:ss]")
+
+        val pickupStr = row.getAs[String](headers.indexOf(pickup)).trim
+        val dropoffStr = row.getAs[String](headers.indexOf(dropoff)).trim
+
+        val pickupTS = LocalDateTime.parse(pickupStr, formatter)
+        val dropoffTS = LocalDateTime.parse(dropoffStr, formatter)
+        val durationMillis = Duration.between(pickupTS, dropoffTS).toMillis
+        val durationMinutes = BigDecimal(durationMillis / 60000.0)
+          .setScale(decimals, RoundingMode.HALF_UP)
+          .toDouble
+
+        val pickupYear = pickupTS.getYear
+
+        Row.fromSeq(row.toSeq ++ Seq(durationMinutes, pickupYear))
+      }.filter { row =>
+        row.getAs[Double](row.toSeq.length-2) > 0.0
+      }
+      headers = headers ++ Seq(colDurationMinutes, colYear)
+
+      val rddWithDurationBin = binColByStepValue(rddWithDurationAndYear, headers.indexOf(colDurationMinutes), 5)
+      headers = headers :+ colDurationMinutesBinLabel
+
+      if (DEBUG) {
+        debugDumpRdd(rddWithDurationBin, "After rddWithDurationBin")
+      }
+
+      val rddWithTimeZones = rddWithDurationBin.map { row =>
+        val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm[:ss]")
+
+        val timeZonesDuration: Map[String, Double] = preciseBucketUDF(timeZones,
+          LocalDateTime.parse(row.getAs[String](headers.indexOf(pickup)).trim, formatter),
+          LocalDateTime.parse(row.getAs[String](headers.indexOf(dropoff)).trim, formatter)
+        )
+
+        val weekday_surcharge: Double =
+          if (isUSHolidayOrWeekend(LocalDateTime.parse(row.getAs[String](headers.indexOf(pickup)).trim, formatter).toLocalDate)) 0
+          else weekDaySurcharge
+
+        val colsToAdd: Seq[Double] = timeZones.keys.toSeq.flatMap { tz =>
+          val duration = timeZonesDuration.getOrElse(tz, 0.0)
+          val totalDuration = row.getAs[Double](headers.indexOf(colDurationMinutes))
+          Seq(duration, BigDecimal(duration * 100 / totalDuration).setScale(decimals, RoundingMode.HALF_UP).toDouble)
+        }
+
+        Row.fromSeq((row.toSeq ++ colsToAdd) :+ weekday_surcharge)
+      }
+
+      val headersToAdd: Seq[String] = timeZones.keys.toSeq.flatMap { tz =>
+        Seq(tz + "_duration", tz + "_duration_pcg")
+      } :+ colWeekdaySurcharge
+
+      headers = headers ++ headersToAdd
+
+      if (DEBUG) {
+        debugDumpRdd(rddWithTimeZones, "After rddWithTimeZones")
+      }
+
+      val rddWithAggregateFees = rddWithTimeZones.map { row =>
+        val fees = colFees
+          .filter(col => headers.contains(col.toLowerCase))
+          .map(col => row.getAs[Double](headers.indexOf(col.toLowerCase))).sum
+
+        Row.fromSeq(row.toSeq :+ fees)
+      }
+
+      headers = headers :+ colAggregateFee
+
+      if (DEBUG) {
+        debugDumpRdd(rddWithAggregateFees, "After rddWithAggregateFees")
+      }
+
+      val rddWithAggregateFeesBin = binColByStepValue(rddWithAggregateFees, headers.indexOf(colAggregateFee), 2)
+
+      headers = headers :+ colAggregateFeeBin
+
+      if (DEBUG) {
+        debugDumpRdd(rddWithAggregateFeesBin, "After rddWithAggregateFeesBin")
+      }
+
+      val rddWithPriceDistanceAndTime = rddWithAggregateFeesBin.map { row =>
+        val pricePerTime = Math.round(row.getAs[Double](headers.indexOf(colFareAmount)) / row.getAs[Double](headers.indexOf(colDurationMinutes)) * 100) / 100.0
+        val pricePerDistance = Math.round(row.getAs[Double](headers.indexOf(colFareAmount)) / row.getAs[Double](headers.indexOf("trip_distance")) * 100) / 100.0
+
+        Row.fromSeq(row.toSeq ++ Seq(pricePerTime, pricePerDistance))
+      }
+
+      headers = headers ++ Seq(colPricePerTime, colPricePerDistance)
+
+      if (DEBUG) {
+        debugDumpRdd(rddWithPriceDistanceAndTime, "After rddWithPriceDistanceAndTime")
+      }
+
+      val rddDurationBin = binColByStepValue(rddWithPriceDistanceAndTime, headers.indexOf("trip_distance"), 5)
+
+      headers = headers :+ colDistanceBin
+
+      if (DEBUG) {
+        debugDumpRdd(rddDurationBin, "After rddDurationBin")
+      }
+
+      val rddTZDurationPcgLabel = binColByStepValue(rddDurationBin, headers.indexOf(colDurationOvernightPcg), 5)
+
+      headers = headers :+ (colDurationOvernightPcg + "_label")
+
+      val actualHeader = headers
+
+      if (DEBUG) {
+        debugDumpRdd(rddTZDurationPcgLabel, "After rddTZDurationPcgLabel")
+      }
+
+      val rddWithKey = rddTZDurationPcgLabel.map { row =>
+        val key = colsForClassification
+          .filter(col => actualHeader.contains(col.toLowerCase))
+          .map(col => row.get(actualHeader.indexOf(col.toLowerCase)))
+          .mkString("_")
+        (key, row)
+      }
+
+      val rddWithKeyForAvg = rddWithKey
+        .mapValues { row =>
+          val costPerDistance = row.getAs[Double](headers.indexOf(colPricePerDistance))
+          val costPerTime = row.getAs[Double](headers.indexOf(colPricePerTime))
+          (costPerDistance, costPerTime, 1L)
+        }
+
+      val rddAvgPrices = rddWithKeyForAvg
+        .aggregateByKey((0.0, 0.0, 0L))(
+          (acc, v) => (acc._1 + v._1, acc._2 + v._2, acc._3 + v._3),
+          (a, b) => (a._1 + b._1, a._2 + b._2, a._3 + b._3)
+        )
+        .mapValues { case (sumDist, sumTime, count) =>
+          val avgDist = BigDecimal(sumDist / count).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
+          val avgTime = BigDecimal(sumTime / count).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
+          (avgDist, avgTime)
+        }
+        .filter { case (_, (dist, time)) => dist > 0.0 && time > 0.0 }
+
+
+      if (DEBUG) {
+        debugDumpRdd(rddAvgPrices, "After rddAvgPrices")
+      }
+
+      val broadcastAvgPrices: Broadcast[Map[String, (Double, Double)]] = spark.sparkContext.broadcast(rddAvgPrices.collectAsMap().toMap)
+
+      val rddJoined = rddWithKey.flatMap { case (key, originalRow) =>
+        broadcastAvgPrices.value.get(key).map { case (avgCostPerDistance, avgCostPerTime) =>
+          Row.fromSeq(originalRow.toSeq ++ Seq(avgCostPerDistance, avgCostPerTime))
+        }
+      }
+
+      headers = headers ++ Seq(colAvgPricePerDistance, colAvgPricePerTime)
+
+      if (DEBUG) {
+        debugDumpRdd(rddJoined, "After rddJoined")
+      }
+
+      val rddPriceComparisons = rddJoined.map { row =>
+        val priceColsToAdd: Seq[Double] =
+          Seq((colPricePerDistance, colAvgPricePerDistance), (colPricePerTime, colAvgPricePerTime))
+            .flatMap { case (colPrice, colAvgPrice) =>
+              val price = row.getAs[Double](headers.indexOf(colPrice))
+              val priceAvg = row.getAs[Double](headers.indexOf(colAvgPrice))
+              val priceDiff = BigDecimal(price - priceAvg).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
+              val priceDiffPcg = BigDecimal(priceDiff / priceAvg * 100).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
+
+              Seq(priceDiff, priceDiffPcg)
+            }
+
+        Row.fromSeq(row.toSeq ++ priceColsToAdd)
+      }
+
+      headers = headers ++ Seq(colPricePerDistanceDiff, colPricePerDistanceDiffPcg, colPricePerTimeDiff, colPricePerTimeDiffPcg)
+
+      if (DEBUG) {
+        debugDumpRdd(rddPriceComparisons, "After rddPriceComparisons")
+      }
+
+      val rddPriceDiffPcgBin = binColByStepValue(
+        binColByStepValue(
+          rddPriceComparisons,
+          headers.indexOf(colPricePerDistanceDiffPcg), 5),
+        headers.indexOf(colPricePerTimeDiffPcg), 5
+      )
+
+      headers = headers ++ Seq(colPricePerDistanceDiffPcgLabel, colPricePerTimeDiffPcgLabel)
+
+      if (DEBUG) {
+        debugDumpRdd(rddPriceDiffPcgBin, "After rddPriceDiffPcgBin")
+      }
+
+      val headersForAnalysis = headers.zipWithIndex.filter(head => colsForClassification.contains(head._1.toLowerCase))
+
+      val headersForAnalysisIdxs = headersForAnalysis.map(_._2)
+      val headersForAnalysisCols = headersForAnalysis.map(_._1)
+
+      val rddForAnalysis = rddPriceDiffPcgBin.map { row =>
+        Row.fromSeq(headersForAnalysisIdxs.map(row.get))
+      }
+
+      val totalCount = rddForAnalysis.count()
+
+      val rddFeatures = colsForValuesAnalysis.map { colName =>
+        val groupCols = Seq(colPricePerDistanceDiffPcgLabel, colPricePerTimeDiffPcgLabel) :+ colName
+
+        val grouped = rddForAnalysis
+          .map { row =>
+            val key = groupCols.map(col => row.get(headersForAnalysisCols.indexOf(col.toLowerCase)))
+            (key, 1)
+          }
+          .reduceByKey(_ + _)
+          .map { case (keySeq, count) =>
+            val value = keySeq.last.toString
+            val costDistLabel = keySeq(0).toString
+            val costTimeLabel = keySeq(1).toString
+            val pcg = BigDecimal(count.toDouble / totalCount * 100).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
+            Row.fromSeq(Seq(colName, value, count, pcg, costDistLabel, costTimeLabel))
+          }
+        grouped
+      }
+
+      if (DEBUG) {
+        debugDumpRdd(rddFeatures(0), "After rddFeatures")
+      }
+
+      val headersForSchema = Seq(
+        StructField("feature", StringType),
+        StructField("value", StringType),
+        StructField("count", IntegerType),
+        StructField("pcg", DoubleType),
+        StructField("cost_distance_label", StringType),
+        StructField("cost_time_label", StringType)
+      )
+
+      val schema = StructType(headersForSchema)
+
+      val dfForAnalysis = spark.createDataFrame(rddFeatures.reduce(_ union _), schema)
+
+      dfForAnalysis.show(1)
+
+      val endTime = System.currentTimeMillis()
+      val durationMs = endTime - startTime
+      println(s"Job $name-dataset optimized executed in $durationMs ms")
 
       dfForAnalysis
         .write
