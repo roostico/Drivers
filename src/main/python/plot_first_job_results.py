@@ -33,14 +33,21 @@ size_multiplier, size_scalar = 2, 6
 
 parser = argparse.ArgumentParser(description="Parse arg for remote configurations.")
 parser.add_argument('--remote', action='store_true', help='Read files from s3')
+parser.add_argument('--dataset', help='Select dataset to work with', default=os.getenv("DATASET"))
+parser.add_argument('--opt', action='store_true', help='Select rather optimized or not dataset to work with', default=os.getenv("DATASET"))
 
 args = parser.parse_args()
 
+if args.opt:
+    output_dir = "output/firstJobOutputOpt"
+else:
+    output_dir = "output/firstJobOutput"
+
 if args.remote:
-    s3_path = f's3://{os.getenv("BUCKET")}/{os.getenv("OUTPUT_DIR")}/{os.getenv("DATASET")}'
+    s3_path = f's3://{os.getenv("BUCKET")}/{output_dir}/{args.dataset}'
     df_all = pd.read_parquet(s3_path, engine='pyarrow')
 else:
-    result_dir = f'{os.getenv("OUTPUT_PATH")}/{os.getenv("OUTPUT_DIR")}/{os.getenv("DATASET")}'
+    result_dir = f'{os.getenv("OUTPUT_PATH")}/{output_dir}/{args.dataset}'
 
     parquet_files = [
         os.path.join(result_dir, f)

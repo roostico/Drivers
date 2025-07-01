@@ -17,6 +17,7 @@ import org.apache.spark.HashPartitioner
 object FirstJobConfigs {
   val DEBUG: Boolean = false
   val decimals: Int = 4
+  val minimumYearDataset: Int = 2024
   val datasetDir = "dataset"
   val outputDir = "output/firstJobOutput"
   val yellowDatasetDir = s"$datasetDir/yellow_cab"
@@ -134,6 +135,11 @@ object FirstJobConfigs {
       case tax: Double => tax >= 0 && tax < 20
       case _ => false
     }
+  }
+
+  val dateFilter: (Any, Int) => Boolean = {
+    case (date: LocalDateTime, minimumYearDataset: Int) => val year: Int = date.getYear; year >= minimumYearDataset && year <= LocalDateTime.now().getYear
+    case _ => false
   }
 
   val colsForClassification: Seq[String] = Seq(
@@ -344,15 +350,19 @@ object FirstJobOpt {
 
       headers = headers.filter(head => colToUse.contains(head.toLowerCase))
 
-      val rddPreprocessed = rddCleaned.filter { row =>
-        headers.zip(row.toSeq).forall { case (header: String, value) =>
-          val taxFilterCondition = if (colFees.contains(header.toLowerCase)) taxFilter(value) else true
-          featureFilters.get(header.toLowerCase) match {
-            case Some(filterFunc) => taxFilterCondition && filterFunc(value)
-            case None => taxFilterCondition // no filter defined for this column, so accept it
+      val rddPreprocessed = rddCleaned
+        .filter { row =>
+          val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm[:ss]")
+          headers.zip(row.toSeq).forall { case (header: String, value) =>
+            val taxFilterCondition = if (colFees.contains(header.toLowerCase)) taxFilter(value) else true
+
+            featureFilters.get(header.toLowerCase) match {
+              case Some(filterFunc) => taxFilterCondition && filterFunc(value)
+              case None => if (header.equals(pickup) || header.equals(dropoff)) { dateFilter(LocalDateTime.parse(row.getAs[String](headers.indexOf(header)).trim, formatter), minimumYearDataset) && taxFilterCondition } else taxFilterCondition
+            }
+
           }
         }
-      }
 
       if (DEBUG) {
         debugDumpRdd(rddPreprocessed, "After rddPreprocessed")
@@ -470,39 +480,43 @@ object FirstJobOpt {
         debugDumpRdd(rddTZDurationPcgLabel, "After rddTZDurationPcgLabel")
       }
 
-      val rddWithKey = rddTZDurationPcgLabel.map { row =>
-        val key = colsForClassification
-          .filter(col => actualHeader.contains(col.toLowerCase))
-          .map(col => row.get(actualHeader.indexOf(col.toLowerCase)))
-          .mkString("_")
-        (key, row)
-      }
-
       val numPartitions = spark.sparkContext.defaultParallelism
       val partitioner = new HashPartitioner(numPartitions)
 
-      val rddWithKeyForAvg = rddWithKey
-        .mapValues { row =>
-          val costPerDistance = row.getAs[Double](headers.indexOf(colPricePerDistance))
-          val costPerTime = row.getAs[Double](headers.indexOf(colPricePerTime))
-          (costPerDistance, costPerTime, 1L)
-        }
-        .partitionBy(partitioner)
-        .persist(StorageLevel.MEMORY_AND_DISK)
+      val rddWithKey =
+        rddTZDurationPcgLabel
+          .map { row =>
+            val key = colsForClassification
+              .filter(col => actualHeader.contains(col.toLowerCase))
+              .map(col => row.get(actualHeader.indexOf(col.toLowerCase)))
+              .mkString("_")
+            (key, row)
+          }
+          .partitionBy(partitioner).persist(StorageLevel.MEMORY_AND_DISK)
 
-      val rddAvgPrices = rddWithKeyForAvg
-        .aggregateByKey((0.0, 0.0, 0L))(
-          (acc, v) => (acc._1 + v._1, acc._2 + v._2, acc._3 + v._3),
-          (a, b) => (a._1 + b._1, a._2 + b._2, a._3 + b._3)
-        )
-        .mapValues { case (sumDist, sumTime, count) =>
-          val avgDist = BigDecimal(sumDist / count).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
-          val avgTime = BigDecimal(sumTime / count).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
-          (avgDist, avgTime)
-        }
-        .filter { case (_, (dist, time)) => dist > 0.0 && time > 0.0 }
+      val rddWithKeyForAvg =
+        rddWithKey
+          .mapValues { row =>
+            val costPerDistance = row.getAs[Double](headers.indexOf(colPricePerDistance))
+            val costPerTime = row.getAs[Double](headers.indexOf(colPricePerTime))
+            (costPerDistance, costPerTime, 1L)
+          }
 
-      rddWithKeyForAvg.unpersist()
+      val rddAvgPrices =
+        rddWithKeyForAvg
+          .reduceByKey {
+            case ((d1, t1, c1), (d2, t2, c2)) => (d1 + d2, t1 + t2, c1 + c2)
+          }
+          .mapValues {
+            case (sumDist, sumTime, count) => {
+              val avgDist = BigDecimal(sumDist / count).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
+              val avgTime = BigDecimal(sumTime / count).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
+              (avgDist, avgTime)
+            }
+          }
+          .filter {
+            case (_, (dist, time)) => dist > 0.0 && time > 0.0
+          }
 
       if (DEBUG) {
         debugDumpRdd(rddAvgPrices, "After rddAvgPrices")
@@ -510,13 +524,20 @@ object FirstJobOpt {
 
       val broadcastAvgPrices: Broadcast[Map[String, (Double, Double)]] = spark.sparkContext.broadcast(rddAvgPrices.collectAsMap().toMap)
 
-      val rddJoined = rddWithKey.flatMap { case (key, originalRow) =>
-        broadcastAvgPrices.value.get(key).map { case (avgCostPerDistance, avgCostPerTime) =>
-          Row.fromSeq(originalRow.toSeq ++ Seq(avgCostPerDistance, avgCostPerTime))
-        }
-      }
+      val rddJoined =
+        rddWithKey
+          .flatMap {
+            case (key, originalRow) => {
+              broadcastAvgPrices.value.get(key).map {
+                case (avgCostPerDistance, avgCostPerTime) =>
+                  Row.fromSeq(originalRow.toSeq ++ Seq(avgCostPerDistance, avgCostPerTime))
+              }
+            }
+          }
 
       headers = headers ++ Seq(colAvgPricePerDistance, colAvgPricePerTime)
+
+      rddWithKey.unpersist()
 
       if (DEBUG) {
         debugDumpRdd(rddJoined, "After rddJoined")
@@ -525,13 +546,15 @@ object FirstJobOpt {
       val rddPriceComparisons = rddJoined.map { row =>
         val priceColsToAdd: Seq[Double] =
           Seq((colPricePerDistance, colAvgPricePerDistance), (colPricePerTime, colAvgPricePerTime))
-            .flatMap { case (colPrice, colAvgPrice) =>
-              val price = row.getAs[Double](headers.indexOf(colPrice))
-              val priceAvg = row.getAs[Double](headers.indexOf(colAvgPrice))
-              val priceDiff = BigDecimal(price - priceAvg).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
-              val priceDiffPcg = BigDecimal(priceDiff / priceAvg * 100).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
+            .flatMap {
+              case (colPrice, colAvgPrice) => {
+                val price = row.getAs[Double](headers.indexOf(colPrice))
+                val priceAvg = row.getAs[Double](headers.indexOf(colAvgPrice))
+                val priceDiff = BigDecimal(price - priceAvg).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
+                val priceDiffPcg = BigDecimal(priceDiff / priceAvg * 100).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
 
-              Seq(priceDiff, priceDiffPcg)
+                Seq(priceDiff, priceDiffPcg)
+              }
             }
 
         Row.fromSeq(row.toSeq ++ priceColsToAdd)
@@ -543,12 +566,13 @@ object FirstJobOpt {
         debugDumpRdd(rddPriceComparisons, "After rddPriceComparisons")
       }
 
-      val rddPriceDiffPcgBin = binColByStepValue(
+      val rddPriceDiffPcgBin =
         binColByStepValue(
-          rddPriceComparisons,
-          headers.indexOf(colPricePerDistanceDiffPcg), 5),
-        headers.indexOf(colPricePerTimeDiffPcg), 5
-      )
+          binColByStepValue(
+            rddPriceComparisons,
+            headers.indexOf(colPricePerDistanceDiffPcg), 5),
+          headers.indexOf(colPricePerTimeDiffPcg), 5
+        )
 
       headers = headers ++ Seq(colPricePerDistanceDiffPcgLabel, colPricePerTimeDiffPcgLabel)
 
@@ -561,30 +585,36 @@ object FirstJobOpt {
       val headersForAnalysisIdxs = headersForAnalysis.map(_._2)
       val headersForAnalysisCols = headersForAnalysis.map(_._1)
 
-      val rddForAnalysis = rddPriceDiffPcgBin.map { row =>
-        Row.fromSeq(headersForAnalysisIdxs.map(row.get))
-      }
+      val rddForAnalysis =
+        rddPriceDiffPcgBin
+          .map { row =>
+            Row.fromSeq(headersForAnalysisIdxs.map(row.get))
+          }
 
       val totalCount = rddForAnalysis.count()
 
-      val rddFeatures = colsForValuesAnalysis.map { colName =>
-        val groupCols = Seq(colPricePerDistanceDiffPcgLabel, colPricePerTimeDiffPcgLabel) :+ colName
+      val rddFeatures =
+        colsForValuesAnalysis
+          .map {
+            colName =>
+              val groupCols = Seq(colPricePerDistanceDiffPcgLabel, colPricePerTimeDiffPcgLabel) :+ colName
 
-        val grouped = rddForAnalysis
-          .map { row =>
-            val key = groupCols.map(col => row.get(headersForAnalysisCols.indexOf(col.toLowerCase)))
-            (key, 1)
+            val grouped = rddForAnalysis
+              .map {
+                row =>
+                  val key = groupCols.map(col => row.get(headersForAnalysisCols.indexOf(col.toLowerCase)))
+                  (key, 1)
+              }
+              .reduceByKey(_ + _)
+              .map { case (keySeq, count) =>
+                val value = keySeq.last.toString
+                val costDistLabel = keySeq(0).toString
+                val costTimeLabel = keySeq(1).toString
+                val pcg = BigDecimal(count.toDouble / totalCount * 100).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
+                Row.fromSeq(Seq(colName, value, count, pcg, costDistLabel, costTimeLabel))
+              }
+            grouped
           }
-          .reduceByKey(_ + _)
-          .map { case (keySeq, count) =>
-            val value = keySeq.last.toString
-            val costDistLabel = keySeq(0).toString
-            val costTimeLabel = keySeq(1).toString
-            val pcg = BigDecimal(count.toDouble / totalCount * 100).setScale(decimals, BigDecimal.RoundingMode.HALF_UP).toDouble
-            Row.fromSeq(Seq(colName, value, count, pcg, costDistLabel, costTimeLabel))
-          }
-        grouped
-      }
 
       if (DEBUG) {
         debugDumpRdd(rddFeatures(0), "After rddFeatures")
