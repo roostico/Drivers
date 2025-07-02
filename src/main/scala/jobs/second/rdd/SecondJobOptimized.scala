@@ -1,6 +1,7 @@
 package jobs.second.rdd
 
 import jobs.second.rdd.DataClasses.{Ride, RideFinalOutput, RideWithBins, RideWithEnrichedInformation, RideWithWeather, WeatherInfo}
+import org.apache.hadoop.mapred.lib.HashPartitioner
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.types._
@@ -329,6 +330,8 @@ object SecondJobOptimized {
       val generalWeather = BinningHelperRDD.generalWeatherLabel(r.weatherInfo.wmoCode)
       RideFinalOutput(r.ride, r.weatherInfo, generalWeather)
     }
+
+    finalRDD.cache()
 
     val binFieldPairs = for {
       x <- binFields
