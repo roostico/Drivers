@@ -4,9 +4,10 @@ import jobs.second.rdd.DataClasses.{Ride, RideFinalOutput, RideWithBins, RideWit
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.types._
+import org.apache.spark.storage.StorageLevel
 import utils.Commons
 
-object SecondJob {
+object SecondJobOptimized {
 
   private val datasetFolder = "./datasets"
   private val outputDir = "/output/secondJobRDD"
@@ -70,7 +71,6 @@ object SecondJob {
     val deploymentMode = args(0)
 
     val startingTime = System.currentTimeMillis()
-
     val weatherFileRDD = spark.read
       .format("CSV")
       .option("header", "true")
@@ -101,20 +101,20 @@ object SecondJob {
     }
 
 
+    /* First Optimization broadcast wmoMap */
+    val wmoMap = wmoLookupPairRDD.collectAsMap()
+    val broadcastWmo = spark.sparkContext.broadcast(wmoMap)
+
     import DataClasses.WeatherInfo
     import java.time.LocalDate
     import java.sql.Timestamp
 
-    val transformedWeatherClassRDD = weatherPairRDD
-      .join(wmoLookupPairRDD)
-      .map(row => {
-        val (id, (date, description)) = row
 
-        val formattedDate  = LocalDate.parse(date)
-        val timestamp = Timestamp.valueOf(formattedDate.atStartOfDay())
-
-        WeatherInfo(id, timestamp, description)
-      })
+    val transformedWeatherClassRDD = weatherPairRDD.map { case (id, date) =>
+      val description = broadcastWmo.value.getOrElse(id, "Unknown")
+      val timestamp = Timestamp.valueOf(LocalDate.parse(date).atStartOfDay())
+      WeatherInfo(id, timestamp, description)
+    }
 
     val yellowDataset = spark.read
       .schema(schemaYellow)
@@ -197,71 +197,75 @@ object SecondJob {
     val withTripDuration = filtered.map(ride => {
       val durationMin = (ride.dropoffDatetime.getTime - ride.pickupDatetime.getTime).toDouble / (1000 * 60)
       RideWithDurationMinutes(ride, durationMin)
-    })
+    }).cache()
 
     val tripDistances = withTripDuration.map { case ride => ride.info.tripDistance }
     val tripDurations = withTripDuration.map { case ride => ride.durationMinutes }
 
-    val distanceSorted = tripDistances.sortBy(identity).zipWithIndex().map(_.swap)
-    val durationSorted = tripDurations.sortBy(identity).zipWithIndex().map(_.swap)
+    val distanceDF = tripDistances.toDF("trip_distance")
+    val durationDF = tripDurations.toDF("trip_duration")
 
+    val Array(distanceLower, distanceUpper) = distanceDF.stat.approxQuantile("trip_distance", Array(0.02, 0.98), 0.01)
+    val Array(durationLower, durationUpper) = durationDF.stat.approxQuantile("trip_duration", Array(0.02, 0.98), 0.01)
 
-    val count = withTripDuration.count()
-    val distanceLower = UtilFunctions.getQuantile(distanceSorted, 0.02, count)
-    val distanceUpper = UtilFunctions.getQuantile(distanceSorted, 0.98, count)
-    val durationLower = UtilFunctions.getQuantile(durationSorted, 0.02, count)
-    val durationUpper = UtilFunctions.getQuantile(durationSorted, 0.98, count)
 
     val filteredWithoutOutliers = withTripDuration.filter { case ride =>
       ride.info.tripDistance >= distanceLower && ride.info.tripDistance <= distanceUpper &&
         ride.durationMinutes >= durationLower && ride.durationMinutes <= durationUpper
-    }
+    }.cache()
 
-
-
-
-
-    val enriched = filteredWithoutOutliers.map { case ride =>
+    val enriched = filteredWithoutOutliers.mapPartitions { iter =>
       val pickupCalendar = java.util.Calendar.getInstance()
-      pickupCalendar.setTime(ride.info.pickupDatetime)
 
-      val hourOfDay = pickupCalendar.get(java.util.Calendar.HOUR_OF_DAY)
-      val dayOfWeek = pickupCalendar.get(java.util.Calendar.DAY_OF_WEEK)
-      val monthOfYear = pickupCalendar.get(java.util.Calendar.MONTH)
-      val year = pickupCalendar.get(java.util.Calendar.YEAR)
+      iter.map { ride =>
+        pickupCalendar.setTime(ride.info.pickupDatetime)
 
-      val isWeekend = if (dayOfWeek == java.util.Calendar.SATURDAY || dayOfWeek == java.util.Calendar.SUNDAY) 1 else 0
+        val hourOfDay = pickupCalendar.get(java.util.Calendar.HOUR_OF_DAY)
+        val dayOfWeek = pickupCalendar.get(java.util.Calendar.DAY_OF_WEEK)
+        val monthOfYear = pickupCalendar.get(java.util.Calendar.MONTH)
+        val year = pickupCalendar.get(java.util.Calendar.YEAR)
 
-      val tripHourBucket = hourOfDay match {
-        case h if h >= 0 && h <= 5  => "late_night"
-        case h if h >= 6 && h <= 9  => "morning"
-        case h if h >= 10 && h <= 15 => "midday"
-        case h if h >= 16 && h <= 19 => "evening"
-        case _ => "night"
+        val isWeekend = if (dayOfWeek == java.util.Calendar.SATURDAY || dayOfWeek == java.util.Calendar.SUNDAY) 1 else 0
+
+        val tripHourBucket = hourOfDay match {
+          case h if h >= 0 && h <= 5   => "late_night"
+          case h if h >= 6 && h <= 9   => "morning"
+          case h if h >= 10 && h <= 15 => "midday"
+          case h if h >= 16 && h <= 19 => "evening"
+          case _                       => "night"
+        }
+
+        val tipPercentage = if (ride.info.totalAmount != 0)
+          (ride.info.tipAmount / ride.info.totalAmount) * 100
+        else 0.0
+
+        val speedMph = if (ride.durationMinutes > 0)
+          ride.info.tripDistance / (ride.durationMinutes / 60.0)
+        else 0.0
+
+        val isRushHour =
+          (dayOfWeek >= java.util.Calendar.MONDAY && dayOfWeek <= java.util.Calendar.FRIDAY) &&
+            ((hourOfDay >= 7 && hourOfDay <= 9) || (hourOfDay >= 16 && hourOfDay <= 18))
+
+        val isLongTrip = ride.info.tripDistance > 5.0 || ride.durationMinutes > 20.0
+
+        RideWithEnrichedInformation(
+          ride,
+          hourOfDay,
+          dayOfWeek,
+          monthOfYear,
+          year,
+          isWeekend,
+          tripHourBucket,
+          tipPercentage,
+          speedMph,
+          isRushHour,
+          isLongTrip
+        )
       }
-
-      val tipPercentage = if (ride.info.totalAmount != 0) (ride.info.tipAmount / ride.info.totalAmount) * 100 else 0.0
-      val speedMph = if (ride.durationMinutes > 0) ride.info.tripDistance / (ride.durationMinutes / 60.0) else 0.0
-
-      val isRushHour = (dayOfWeek >= java.util.Calendar.MONDAY && dayOfWeek <= java.util.Calendar.FRIDAY) &&
-        ((hourOfDay >= 7 && hourOfDay <= 9) || (hourOfDay >= 16 && hourOfDay <= 18))
-
-      val isLongTrip = ride.info.tripDistance > 5.0 || ride.durationMinutes  > 20.0
-
-      RideWithEnrichedInformation(
-        ride,
-        hourOfDay,
-        dayOfWeek,
-        monthOfYear,
-        year,
-        isWeekend,
-        tripHourBucket,
-        tipPercentage,
-        speedMph,
-        isRushHour,
-        isLongTrip
-      )
     }
+
+
 
     val binned = enriched.map {
       case ride =>
@@ -309,12 +313,16 @@ object SecondJob {
           speedBin)
     }
 
-    val weatherByDate = transformedWeatherClassRDD.map(w => (w.dateOfRelevation.toLocalDateTime.toLocalDate, w))
-    val rideByDate = binned.map(r => (r.enrichedInfo.rideWithMinutes.info.pickupDatetime.toLocalDateTime.toLocalDate, r))
+    val weatherMap = transformedWeatherClassRDD
+      .map(w => (w.dateOfRelevation.toLocalDateTime.toLocalDate, w))
+      .collectAsMap()
 
-    val joinedWeather = rideByDate.join(weatherByDate).map {
-      case (_, (ride, weather)) =>
-        RideWithWeather(ride, weather)
+    val broadcastWeatherMap = spark.sparkContext.broadcast(weatherMap)
+    val joinedWeather = binned.flatMap { r =>
+      val rideDate = r.enrichedInfo.rideWithMinutes.info.pickupDatetime.toLocalDateTime.toLocalDate
+      broadcastWeatherMap.value.get(rideDate).map { weather =>
+        RideWithWeather(r, weather)
+      }
     }
 
     val finalRDD = joinedWeather.map { r =>
@@ -328,9 +336,10 @@ object SecondJob {
       if x != y
     } yield (x, y)
 
-    val combinationRDD: RDD[Row] = finalRDD.flatMap { row =>
+    val combinationRDD = finalRDD
+      .flatMap { row =>
         binFieldPairs.map { case (x, y) =>
-          val matchVal : String => String = {
+          def binValue(field: String): String = field match {
             case "tripDistanceBin" => row.ride.tripDistanceBin
             case "tripDurationBin" => row.ride.tripDurationBin
             case "fareAmountBin" => row.ride.fareAmountBin
@@ -338,19 +347,23 @@ object SecondJob {
             case "speedBin" => row.ride.speedBin
           }
 
-          val binX = matchVal(x)
-          val binY = matchVal(y)
+          val binX = binValue(x)
+          val binY = binValue(y)
 
-          ((x, y, binX, binY), (row.ride.enrichedInfo.tipPercentage, 1L))
+          ((x, y, binX, binY), row.ride.enrichedInfo.tipPercentage)
         }
-    }
-    .reduceByKey((a, b) => (a._1 + b._1, a._2 + b._2))
-    .map { case ((fieldX, fieldY, binX, binY), (sumTip, count)) =>
+      }
+      .aggregateByKey((0.0, 0L))(
+        (acc, tip) => (acc._1 + tip, acc._2 + 1),
+        (a, b) => (a._1 + b._1, a._2 + b._2)
+      )
+      .map { case ((fieldX, fieldY, binX, binY), (sumTip, count)) =>
         Row(fieldX, fieldY, binX, binY, sumTip / count)
-    }
+      }
 
 
-    val allTipByBinRDD: RDD[Row] = finalRDD.flatMap { row =>
+    val allTipByBinRDD: RDD[Row] = finalRDD
+      .flatMap { row =>
         binFields.map { binFeature =>
           val bin = binFeature match {
             case "fareAmountBin" => row.ride.fareAmountBin
@@ -359,23 +372,36 @@ object SecondJob {
             case "tipPercentageBin" => row.ride.tipPercentageBin
             case "speedBin" => row.ride.speedBin
           }
-          ((binFeature, bin), (row.ride.enrichedInfo.tipPercentage, 1L))
+          ((binFeature, bin), row.ride.enrichedInfo.tipPercentage)
         }
       }
-      .reduceByKey((a, b) => (a._1 + b._1, a._2 + b._2))
+      .aggregateByKey((0.0, 0L))(
+        (acc, tip) => (acc._1 + tip, acc._2 + 1),
+        (a, b) => (a._1 + b._1, a._2 + b._2)
+      )
       .map { case ((feature, bin), (sumTip, count)) =>
         Row(feature, bin, sumTip / count)
       }
 
     val avgTipByWeather = finalRDD
-      .map(r => (r.generalWeather, (r.ride.enrichedInfo.tipPercentage, 1L)))
-      .reduceByKey((a, b) => (a._1 + b._1, a._2 + b._2))
-      .map { case (weather, (sumTip, count)) => Row(weather, sumTip / count) }
+      .map(r => (r.generalWeather, r.ride.enrichedInfo.tipPercentage))
+      .aggregateByKey((0.0, 0L))(
+        (acc, tip) => (acc._1 + tip, acc._2 + 1),
+        (a, b) => (a._1 + b._1, a._2 + b._2)
+      )
+      .map { case (weather, (sumTip, count)) =>
+        Row(weather, sumTip / count)
+      }
 
     val tipByHourBucket = finalRDD
-      .map(r => (r.ride.enrichedInfo.tripHourBucket, (r.ride.enrichedInfo.tipPercentage, 1L)))
-      .reduceByKey((a, b) => (a._1 + b._1, a._2 + b._2))
-      .map { case (bucket, (sumTip, count)) => Row(bucket, sumTip / count) }
+      .map(r => (r.ride.enrichedInfo.tripHourBucket, r.ride.enrichedInfo.tipPercentage))
+      .aggregateByKey((0.0, 0L))(
+        (acc, tip) => (acc._1 + tip, acc._2 + 1),
+        (a, b) => (a._1 + b._1, a._2 + b._2)
+      )
+      .map { case (bucket, (sumTip, count)) =>
+        Row(bucket, sumTip / count)
+      }
 
     val allTipByBinSchema = StructType(Seq(
       StructField("feature", StringType),
@@ -408,6 +434,7 @@ object SecondJob {
     ))
 
     spark.createDataFrame(avgTipByWeather, weatherSchema)
+      .coalesce(10)
       .write
       .mode("overwrite")
       .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/avg_tip_by_weather"))
@@ -418,6 +445,7 @@ object SecondJob {
     ))
 
     spark.createDataFrame(tipByHourBucket, bucketSchema)
+      .coalesce(10)
       .write
       .mode("overwrite")
       .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/avg_tip_by_hour_bucket"))
