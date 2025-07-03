@@ -20,6 +20,7 @@ object FirstJobConfigs {
   val minimumYearDataset: Int = 2024
   val datasetDir = "dataset"
   val outputDir = "output/firstJobOutput"
+  val outputDirOpt = "output/firstJobOutputOpt"
   val yellowDatasetDir = s"$datasetDir/yellow_cab"
   val greenDatasetDir = s"$datasetDir/green_cab"
   val fhvDatasetDir = s"$datasetDir/fhv_cab"
@@ -642,7 +643,7 @@ object FirstJobOpt {
       dfForAnalysis
         .write
         .mode("overwrite")
-        .parquet(Commons.getDatasetPath(deploymentMode, outputDir + f"/$name"))
+        .parquet(Commons.getDatasetPath(deploymentMode, outputDirOpt + f"/$name"))
     }
   }
 }
@@ -690,11 +691,13 @@ object FirstJob {
       headers = headers.filter(head => colToUse.contains(head.toLowerCase))
 
       val rddPreprocessed = rddCleaned.filter { row =>
+        val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm[:ss]")
         headers.zip(row.toSeq).forall { case (header: String, value) =>
           val taxFilterCondition = if (colFees.contains(header.toLowerCase)) taxFilter(value) else true
+
           featureFilters.get(header.toLowerCase) match {
             case Some(filterFunc) => taxFilterCondition && filterFunc(value)
-            case None => taxFilterCondition // no filter defined for this column, so accept it
+            case None => if (header.equals(pickup) || header.equals(dropoff)) { dateFilter(LocalDateTime.parse(row.getAs[String](headers.indexOf(header)).trim, formatter), minimumYearDataset) && taxFilterCondition } else taxFilterCondition
           }
         }
       }

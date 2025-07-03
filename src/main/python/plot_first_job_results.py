@@ -34,7 +34,7 @@ size_multiplier, size_scalar = 2, 6
 parser = argparse.ArgumentParser(description="Parse arg for remote configurations.")
 parser.add_argument('--remote', action='store_true', help='Read files from s3')
 parser.add_argument('--dataset', help='Select dataset to work with', default=os.getenv("DATASET"))
-parser.add_argument('--opt', action='store_true', help='Select rather optimized or not dataset to work with', default=os.getenv("DATASET"))
+parser.add_argument('--opt', action='store_true', help='Select rather optimized or not dataset to work with')
 
 args = parser.parse_args()
 
