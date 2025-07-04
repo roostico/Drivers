@@ -162,8 +162,8 @@ object SecondJob {
         $"total_amount",
         $"passenger_count"
       )
-      .na.drop()
-      .dropDuplicates()
+//      .na.drop()
+//      .dropDuplicates()
       .rdd
       .map(r => Ride(
         r.getInt(0),
@@ -216,10 +216,6 @@ object SecondJob {
       ride.info.tripDistance >= distanceLower && ride.info.tripDistance <= distanceUpper &&
         ride.durationMinutes >= durationLower && ride.durationMinutes <= durationUpper
     }
-
-
-
-
 
     val enriched = filteredWithoutOutliers.map { case ride =>
       val pickupCalendar = java.util.Calendar.getInstance()
@@ -372,10 +368,6 @@ object SecondJob {
       .reduceByKey((a, b) => (a._1 + b._1, a._2 + b._2))
       .map { case (weather, (sumTip, count)) => Row(weather, sumTip / count) }
 
-    val tipByHourBucket = finalRDD
-      .map(r => (r.ride.enrichedInfo.tripHourBucket, (r.ride.enrichedInfo.tipPercentage, 1L)))
-      .reduceByKey((a, b) => (a._1 + b._1, a._2 + b._2))
-      .map { case (bucket, (sumTip, count)) => Row(bucket, sumTip / count) }
 
     val allTipByBinSchema = StructType(Seq(
       StructField("feature", StringType),
@@ -411,6 +403,11 @@ object SecondJob {
       .write
       .mode("overwrite")
       .parquet(Commons.getDatasetPath(deploymentMode, s"$outputDir/avg_tip_by_weather"))
+
+    val tipByHourBucket = finalRDD
+      .map(r => (r.ride.enrichedInfo.tripHourBucket, (r.ride.enrichedInfo.tipPercentage, 1L)))
+      .reduceByKey((a, b) => (a._1 + b._1, a._2 + b._2))
+      .map { case (bucket, (sumTip, count)) => Row(bucket, sumTip / count) }
 
     val bucketSchema = StructType(Seq(
       StructField("hour_bucket", StringType),

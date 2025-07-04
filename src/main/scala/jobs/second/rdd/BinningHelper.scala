@@ -22,4 +22,12 @@ object BinningHelperRDD {
     case c if (80 to 99).contains(c)       => "stormy"
     case _                                       => "unknown"
   }
+
+  def tripHourBucket(hour: Int): String = hour match {
+    case h if h >= 0 && h <= 5  => "late_night"
+    case h if h >= 6 && h <= 9  => "morning"
+    case h if h >= 10 && h <= 15 => "midday"
+    case h if h >= 16 && h <= 19 => "evening"
+    case _ => "night"
+  }
 }
