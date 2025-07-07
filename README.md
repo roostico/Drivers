@@ -101,12 +101,3 @@ Run arguments: remote
 Before launch: Upload Files Through SFTP
 
 It is also possible to add a before launch command, triggering gradle build task to force building before running
-
-## TODO
-
-Features bin change impact on tips
-
-costo medio ($ / miles) (fasce) | Total_fees (Total_amount - Fare_amount - Tip_amount) (fasce) | Trip_duration (fasce) | Trip_distance (fasce) -> avg_tip
-
-10 $ / miles | 2 - 5 $ | 30 - 40 minuti | 20 - 30 miles -> 3$
-10 $ / miles | 2 - 5 $ | 30 - 40 minuti | 30 - 40 miles -> 5$
